@@ -1,0 +1,27 @@
+{
+  "name": "@agent-learning/01-langgraph-basics",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "02": "tsx src/02-conditional-edge.ts",
+    "03": "tsx src/03-react-agent.ts",
+    "04": "tsx src/04-checkpointer.ts",
+    "05": "tsx src/05-human-in-the-loop.ts",
+    "06": "tsx src/06-streaming.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.40",
+    "@langchain/langgraph": "^0.3.0",
+    "@langchain/openai": "^0.4.0",
+    "dotenv": "^17.4.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

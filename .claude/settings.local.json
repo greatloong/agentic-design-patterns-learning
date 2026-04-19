@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install:*)",
+      "Bash(pnpm:*)",
+      "WebFetch(domain:adp.xindoo.xyz)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
