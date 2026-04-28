@@ -6,6 +6,15 @@
  *   - Command.RESUME：携带人工输入恢复执行
  *   - 依赖 Checkpointer：暂停状态需要持久化
  *
+ * 实现原理：
+ *   interrupt() 并非真正的"暂停"。首次执行时它会 throw GraphInterrupt 异常，
+ *   图引擎 catch 住后将状态存入 Checkpointer；恢复时整个节点函数会从头重跑，
+ *   但此时 interrupt() 检测到有 resume 值，直接 return，后续代码才会执行。
+ *
+ * ⚠️ 实践要点：
+ *   interrupt() 之前的代码在恢复时会重复执行，因此必须是幂等的。
+ *   有副作用的逻辑（写数据库、发请求等）应放在 interrupt() 之后。
+ *
  * 场景：Agent 准备执行"危险操作"前，先展示计划，等待人工确认
  *
  * 图结构：

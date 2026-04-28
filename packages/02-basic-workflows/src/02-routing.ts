@@ -1,14 +1,33 @@
 /**
  * 02 - Routing（路由）
  *
- * 模式：LLM 作为分类器，根据输入意图分发到不同处理路径
+ * ── 是什么 ──────────────────────────────────────────────────────────────────
+ * 用 LLM 作为分类器，根据输入的语义将任务分发到不同的处理路径。
+ * 每条路径有自己专属的处理节点和 prompt，只关注自己的场景。
  *
  * 图结构：
- *   START → classifier → (条件边) → technical → END
- *                                 → billing   → END
- *                                 → chitchat  → END
+ *   START → classifier → (条件边) → techSupport  → END
+ *                                 → refundHandler → END
+ *                                 → generalChat   → END
  *
- * 场景：客服系统，根据用户问题类型路由到不同处理节点
+ * ── 解决什么问题 ─────────────────────────────────────────────────────────────
+ * 用一个通用节点处理所有输入时，prompt 臃肿、效果差。
+ * Routing 让每条路径只做一件事，专人做专事。
+ *
+ * ── withStructuredOutput：强制 LLM 返回结构化 JSON ──────────────────────────
+ * LangChain 把 Zod schema 转成 OpenAI function calling 格式，强制 LLM 只能
+ * 返回符合 schema 的 JSON，不会有多余文字，不会解析失败。
+ * 这是生产中分类器节点的标准写法。
+ *
+ * ── 与其他模式的对比 ─────────────────────────────────────────────────────────
+ * vs 条件路由（阶段零 0.2）：
+ *   - 阶段零：硬编码逻辑做路由（判断数字、布尔值）
+ *   - Routing Pattern：LLM 做分类器，理解自然语言语义
+ *
+ * vs Prompt Chaining：
+ *   - Prompt Chaining：所有输入走同一条线性路径
+ *   - Routing：不同输入走不同分叉路径
+ *   - 两者可组合：先路由，再在每条路径上做 chaining
  */
 
 import "dotenv/config";
@@ -19,8 +38,12 @@ import { z } from "zod";
 
 // ── State ──────────────────────────────────────────────────────────────────
 const GraphState = Annotation.Root({
-  userMessage: Annotation<string>({ reducer: (_, n) => n }),
-  category: Annotation<string>({ reducer: (_, n) => n, default: () => "" }),
+  input: Annotation<string>({ reducer: (_, n) => n }),
+  // 分类结果：classifier 节点写入，条件边读取
+  intent: Annotation<"technical" | "refund" | "general">({
+    reducer: (_, n) => n,
+    default: () => "general",
+  }),
   response: Annotation<string>({ reducer: (_, n) => n, default: () => "" }),
 });
 
@@ -33,103 +56,107 @@ const llm = new ChatOpenAI({
   configuration: { baseURL: "https://api.deepseek.com/v1" },
 });
 
-// DeepSeek 不支持 response_format，改用 tool calling 实现结构化输出
-const classifyTool = {
-  name: "classify",
-  description: "对用户消息进行分类",
-  schema: z.object({
-    category: z.enum(["technical", "billing", "chitchat"]).describe("消息类别"),
-    reason: z.string().describe("分类原因"),
-  }),
-};
-const classifierLlm = llm.bindTools([
-  { name: classifyTool.name, description: classifyTool.description, schema: classifyTool.schema },
-]);
+// ── 分类器：用 withStructuredOutput 强制返回枚举值 ─────────────────────────
+// Zod schema 定义期望的输出结构
+const intentSchema = z.object({
+  intent: z.enum(["technical", "refund", "general"]).describe(
+    "technical: 技术问题/故障/使用帮助；refund: 退款/订单/费用；general: 其他咨询"
+  ),
+});
+
+// withStructuredOutput 返回的 classifier 每次调用都会返回 { intent: "..." }
+// 不会有多余文字，不会解析失败
+//
+// 注意：DeepSeek 不支持 response_format: json_schema，需要指定 method: "functionCalling"
+// functionCalling 方式：把 schema 转成 tool definition，LLM 通过 tool call 返回结构化结果
+// 效果完全相同，只是底层传输方式不同
+const classifier = llm.withStructuredOutput(intentSchema, { method: "functionCalling" });
 
 // ── 节点 ───────────────────────────────────────────────────────────────────
 
-// 分类节点：LLM 判断用户意图
+// 1. classifier 节点：LLM 判断用户意图，写入 intent 字段
 async function classifierNode(state: State): Promise<Partial<State>> {
-  console.log(`\n[classifier] 分析: "${state.userMessage}"`);
+  console.log(`\n[classifier] 分析意图: "${state.input}"`);
 
-  const response = await classifierLlm.invoke([
+  const result = await classifier.invoke([
     new SystemMessage(
-      `将用户消息分类为以下类别之一：
-      - technical：技术问题（产品使用、bug、功能咨询）
-      - billing：账单问题（付款、退款、订阅）
-      - chitchat：闲聊（问候、随意对话）
-      必须调用 classify 工具返回结果。`
+      "你是一个客服意图分类器。根据用户消息判断意图类型，只能返回指定的枚举值。"
     ),
-    new HumanMessage(state.userMessage),
+    new HumanMessage(state.input),
   ]);
 
-  // 从 tool_calls 里取出分类结果
-  const toolCall = response.tool_calls?.[0];
-  const category = toolCall?.args?.category ?? "chitchat";
-  const reason = toolCall?.args?.reason ?? "";
-  console.log(`[classifier] 类别: ${category}（原因: ${reason}）`);
-  return { category };
+  console.log(`[classifier] 意图识别结果: ${result.intent}`);
+  return { intent: result.intent };
 }
 
-// 三条处理路径，各自有专门的 system prompt
-async function technicalNode(state: State): Promise<Partial<State>> {
-  console.log(`[technical] 处理技术问题...`);
-  const res = await llm.invoke([
-    new SystemMessage("你是技术支持专员，专注解决产品技术问题，回答简洁专业。"),
-    new HumanMessage(state.userMessage),
+// 2. 三个处理节点，各有专属 prompt
+async function techSupportNode(state: State): Promise<Partial<State>> {
+  console.log(`[techSupport] 处理技术问题...`);
+  const response = await llm.invoke([
+    new SystemMessage("你是一个技术支持专家。用简洁专业的语言解答技术问题，如需要可提供排查步骤。"),
+    new HumanMessage(state.input),
   ]);
-  return { response: res.content as string };
+  return { response: response.content as string };
 }
 
-async function billingNode(state: State): Promise<Partial<State>> {
-  console.log(`[billing] 处理账单问题...`);
-  const res = await llm.invoke([
-    new SystemMessage("你是账单支持专员，处理付款和订阅问题，态度友好耐心。"),
-    new HumanMessage(state.userMessage),
+async function refundHandlerNode(state: State): Promise<Partial<State>> {
+  console.log(`[refundHandler] 处理退款请求...`);
+  const response = await llm.invoke([
+    new SystemMessage("你是一个退款处理专员。同理心回应用户，说明退款流程，预计3-5个工作日到账。"),
+    new HumanMessage(state.input),
   ]);
-  return { response: res.content as string };
+  return { response: response.content as string };
 }
 
-async function chitchatNode(state: State): Promise<Partial<State>> {
-  console.log(`[chitchat] 处理闲聊...`);
-  const res = await llm.invoke([
-    new SystemMessage("你是一个友好的助手，轻松愉快地和用户聊天。"),
-    new HumanMessage(state.userMessage),
+async function generalChatNode(state: State): Promise<Partial<State>> {
+  console.log(`[generalChat] 处理一般咨询...`);
+  const response = await llm.invoke([
+    new SystemMessage("你是一个友善的客服助手。热情回答用户的一般性问题。"),
+    new HumanMessage(state.input),
   ]);
-  return { response: res.content as string };
+  return { response: response.content as string };
 }
 
-// ── 路由函数 ───────────────────────────────────────────────────────────────
-function routeByCategory(state: State): "technical" | "billing" | "chitchat" {
-  return state.category as "technical" | "billing" | "chitchat";
+// ── 条件边：读取 state.intent，决定路由目标 ────────────────────────────────
+function routeByIntent(state: State): "techSupport" | "refundHandler" | "generalChat" {
+  // state.intent 由 classifierNode 写入，这里直接读取
+  const routes = {
+    technical: "techSupport" as const,
+    refund: "refundHandler" as const,
+    general: "generalChat" as const,
+  };
+  return routes[state.intent];
 }
 
 // ── 构建图 ─────────────────────────────────────────────────────────────────
 const graph = new StateGraph(GraphState)
   .addNode("classifier", classifierNode)
-  .addNode("technical", technicalNode)
-  .addNode("billing", billingNode)
-  .addNode("chitchat", chitchatNode)
+  .addNode("techSupport", techSupportNode)
+  .addNode("refundHandler", refundHandlerNode)
+  .addNode("generalChat", generalChatNode)
   .addEdge(START, "classifier")
-  .addConditionalEdges("classifier", routeByCategory)
-  .addEdge("technical", END)
-  .addEdge("billing", END)
-  .addEdge("chitchat", END)
+  // classifier 之后走条件边，根据 intent 分发
+  .addConditionalEdges("classifier", routeByIntent)
+  // 三条路径都直接到 END
+  .addEdge("techSupport", END)
+  .addEdge("refundHandler", END)
+  .addEdge("generalChat", END)
   .compile();
 
-// ── 运行三种场景 ───────────────────────────────────────────────────────────
+// ── 演示：三种不同意图的输入 ───────────────────────────────────────────────
 const testCases = [
-  "我的 API 调用一直返回 429 错误，怎么解决？",
-  "我上个月被多扣了一次费用，能退款吗？",
-  "你好，今天天气真不错！",
+  "我的 App 一直崩溃，打开就闪退，怎么办？",
+  "我上周买的课程想申请退款，订单号是 A12345",
+  "你们平台有哪些课程分类？",
 ];
 
-console.log("═".repeat(50));
-console.log("Routing：LLM 分类器驱动的客服路由");
-console.log("═".repeat(50));
+for (const input of testCases) {
+  console.log("\n" + "═".repeat(50));
+  console.log(`输入: ${input}`);
+  console.log("═".repeat(50));
 
-for (const msg of testCases) {
-  console.log(`\n${"─".repeat(40)}`);
-  const result = await graph.invoke({ userMessage: msg });
-  console.log(`\n回复: ${result.response}`);
+  const result = await graph.invoke({ input });
+
+  console.log(`意图: ${result.intent}`);
+  console.log(`回复:\n${result.response}`);
 }

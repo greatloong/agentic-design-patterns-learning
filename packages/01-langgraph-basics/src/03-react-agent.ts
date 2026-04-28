@@ -6,10 +6,43 @@
  * 图结构：
  *   START → agent → (条件边) → tools → agent → ... → END
  *
- * 关键点：
- *   - State 只存 messages（对话历史）
- *   - LLM 通过 tool call 信号驱动循环
- *   - 条件边检查最后一条消息是否包含 tool call
+ * 完整执行流程：
+ *
+ * [Step 1] bindTools(tools)
+ *   把工具的 name / description / schema 序列化成 OpenAI tools 格式。
+ *   之后每次调用该 llm，HTTP 请求体都会自动携带这份工具描述，
+ *   LLM 才知道"我有哪些工具可以调用"。
+ *
+ * [Step 2] agentNode 第一次执行
+ *   llm.invoke(state.messages) 发出 HTTP 请求，携带：
+ *     - messages: [用户问题]
+ *     - tools:    [get_weather schema, calculator schema]
+ *   LLM 决定调用工具，响应体不含自然语言，而是：
+ *     { role: "assistant", content: "", tool_calls: [
+ *         { id: "call_abc", function: { name: "get_weather", arguments: '{"city":"北京"}' } },
+ *         { id: "call_def", function: { name: "calculator",  arguments: '{"expression":"123*456"}' } }
+ *     ]}
+ *   LangChain 将其包装成 AIMessage，tool_calls 已解析为 JS 对象数组，追加进 State。
+ *
+ * [Step 3] shouldContinue 条件边
+ *   检查最后一条 AIMessage 是否有 tool_calls：
+ *     有 → 路由到 tools 节点
+ *     无 → 路由到 END
+ *
+ * [Step 4] ToolNode 执行工具
+ *   遍历 tool_calls，找到对应函数并调用：
+ *     get_weather({ city: "北京" })  → "晴，25°C，东南风 3 级"
+ *     calculator({ expression: "123 * 456" }) → "56088"
+ *   把每个结果包成 ToolMessage（携带对应的 tool_call_id），追加进 State。
+ *
+ * [Step 5] agentNode 第二次执行
+ *   此时 state.messages 包含：用户消息 + AIMessage(tool_calls) + 2 个 ToolMessage。
+ *   LLM 看到完整上下文，理解工具已执行完毕，生成最终自然语言回答，无 tool_calls。
+ *
+ * [Step 6] shouldContinue 再次检查
+ *   最后一条 AIMessage 无 tool_calls → 路由到 END，图结束。
+ *
+ * 核心驱动力：state.messages 是不断增长的历史列表，LLM 每次都能"看到"完整上下文。
  */
 
 import "dotenv/config";
