@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "01": "tsx src/01-checkpointer-prod.ts"
+    "01": "tsx src/01-checkpointer-prod.ts",
+    "02": "tsx src/02-store-basics.ts"
   },
   "dependencies": {
     "@langchain/core": "^0.3.40",
