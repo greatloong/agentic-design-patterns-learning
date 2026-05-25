@@ -8,7 +8,9 @@
     "02": "tsx src/02-store-basics.ts",
     "03": "tsx src/03-store-semantic.ts",
     "04": "tsx src/04-hybrid-retrieval.ts",
-    "05": "tsx src/05-audn-curation-gate.ts"
+    "05": "tsx src/05-audn-curation-gate.ts",
+    "06": "tsx src/06-hot-cold-pipeline.ts",
+    "07": "tsx src/07-memory-compression.ts"
   },
   "dependencies": {
     "@langchain/core": "^0.3.40",
