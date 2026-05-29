@@ -97,7 +97,7 @@
 
 | #   | ADP章节 | Pattern               | 核心思想                                           | 状态 |
 | --- | ------- | --------------------- | -------------------------------------------------- | ---- |
-| 4.1 | Ch.8    | Memory Management     | 短期/长期记忆，跨会话记忆，Checkpointer + 外部存储 | ⏳   |
+| 4.1 | Ch.8    | Memory Management     | 短期/长期记忆，跨会话记忆，Checkpointer + 外部存储 | ✅   |
 | 4.2 | Ch.9    | Learning & Adaptation | Agent 从经验中学习，动态调整行为，few-shot 更新    | ⏳   |
 
 ---

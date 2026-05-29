@@ -102,7 +102,7 @@ const mem0 = new Memory({
     config: {
       collectionName: "agent_memories",
       dimension: 1024, // 须与 embedding 模型输出维度一致
-      dbPath: path.resolve(__dirname, "../.mem0-store.db"), // SQLite 存储路径（默认 ~/.mem0）
+      dbPath: path.resolve(__dirname, "../.mem0/store.db"),
       // 指定哪些字段参与 embedding 索引（类似 InMemoryStore 的 index.fields）：
       // embeddingFields: ["content", "summary"],
       // Mem0 默认对整条 memory 的文本内容做 embedding；
@@ -112,6 +112,24 @@ const mem0 = new Memory({
   },
   // 禁用 Mem0 内置的 SQLite 历史记录（我们用 PostgresSaver 管理 Short-term）
   disableHistory: true,
+  // ── customInstructions：自定义 Fact Extraction 指令 ──
+  // 注入到 Mem0 内部 AUDN prompt 的 "## Custom Instructions" 部分（最高优先级）
+  // 用途：控制提取哪些类型的事实、忽略什么、输出语言等
+  // 不配置时 Mem0 使用默认 prompt（提取所有可记忆信息）
+  customInstructions: `【提取规则】
+- 提取：用户姓名、职业、技术栈偏好、饮食偏好、工具选型、学习目标
+- 忽略：一次性问答（天气、时间）、纯寒暄、助手自身的推荐内容
+- 粒度：技术偏好精确到具体框架名（React 而非'前端框架'，PostgreSQL 而非'数据库'）
+
+【AUDN 决策】
+- ADD：全新事实，与已有记忆无语义重叠
+- UPDATE：同一主题的新值替换旧值（如'喜欢 Vue' → '喜欢 React'，更新而非新增）
+- DELETE：用户明确否定（如'我不再用 XX 了'、'之前说错了'）
+- NOOP：信息已存在且无变化，或不属于提取范围
+
+【输出要求】
+- 所有 memory 用中文输出
+- 每条 memory 是一个独立事实，不要合并多个事实到一条里`,
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
