@@ -11,7 +11,8 @@
     "05": "tsx src/05-audn-curation-gate.ts",
     "06": "tsx src/06-hot-cold-pipeline.ts",
     "07": "tsx src/07-memory-compression.ts",
-    "08": "tsx src/08-production-synthesis.ts"
+    "08": "tsx src/08-production-synthesis.ts",
+    "09": "tsx src/09-feedback-learning.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.1.48",
