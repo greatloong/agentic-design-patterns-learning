@@ -5,7 +5,7 @@
 > LLM：DeepSeek API（兼容 OpenAI 协议）
 > 参考资料：
 >
-> - ADP 书籍：`/Users/wangyuelong/Desktop/Learning/agentic-design-patterns`
+> - ADP 书籍：https://github.com/xindoo/agentic-design-patterns
 > - LangGraph 文档：https://docs.langchain.com/oss/javascript/langgraph/overview
 
 ---
