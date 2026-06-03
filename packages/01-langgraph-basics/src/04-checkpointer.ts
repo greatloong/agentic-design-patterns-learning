@@ -81,7 +81,9 @@ const checkpoint = await checkpointer.get({
   configurable: { thread_id: "thread-alice" },
 });
 
-console.log(`thread-alice 的消息数: ${checkpoint?.channel_values?.messages?.length ?? 0}`);
-console.log("消息角色序列:", checkpoint?.channel_values?.messages?.map(
-  (m: { _getType: () => string }) => m._getType()
-).join(" → "));
+// v1 里 channel_values 是 Record<string, unknown>，messages 需显式断言为消息数组
+const snapshotMessages = (checkpoint?.channel_values?.messages ?? []) as Array<{
+  _getType: () => string;
+}>;
+console.log(`thread-alice 的消息数: ${snapshotMessages.length}`);
+console.log("消息角色序列:", snapshotMessages.map((m) => m._getType()).join(" → "));

@@ -61,6 +61,8 @@ packages/
 | 0.4 | Checkpointer（状态持久化） | `src/04-checkpointer.ts` |
 | 0.5 | Human-in-the-loop | `src/05-human-in-the-loop.ts` |
 | 0.6 | Streaming | `src/06-streaming.ts` |
+| 0.7 | Streaming + AG-UI 协议（官方 @ag-ui/langgraph，双进程） | `src/07-streaming-ag-ui.ts` |
+| 0.7* | AG-UI 手写转换器（参考对照版，进程内纯 SSE） | `src/07-streaming-ag-ui-manual.ts` |
 
 ### 阶段一：基础工作流模式
 

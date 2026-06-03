@@ -1,0 +1,8 @@
+{
+  "node_version": "20",
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./src/agui/graph.ts:graph"
+  },
+  "env": ".env"
+}

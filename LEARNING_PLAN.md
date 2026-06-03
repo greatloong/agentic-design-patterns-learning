@@ -38,6 +38,8 @@
 | 0.4 | Checkpointer（状态持久化） | `src/04-checkpointer.ts`      | ✅ 完成 |
 | 0.5 | Human-in-the-loop          | `src/05-human-in-the-loop.ts` | ✅ 完成 |
 | 0.6 | Streaming                  | `src/06-streaming.ts`         | ✅ 完成 |
+| 0.7 | Streaming + AG-UI 协议      | `src/07-streaming-ag-ui.ts`   | ✅ 完成 |
+| 0.7*| AG-UI 手写转换器（参考对照） | `src/07-streaming-ag-ui-manual.ts` | ✅ 完成 |
 
 ### 关键概念笔记
 
@@ -48,6 +50,28 @@
 - **MessagesAnnotation**：内置的 messages state，reducer 为追加，适合对话场景
 - **ToolNode**：内置节点，自动解析 AIMessage 的 tool_calls 并执行工具
 - **shouldContinue**：检查最后一条 AIMessage 是否有 tool_calls，驱动 ReAct 循环
+- **AG-UI 协议**：Agent ↔ 前端的标准交互协议（SSE 事件流）。后端持续吐出带类型事件
+  `REASONING_*`（思考）/ `TEXT_MESSAGE_*`（回答）/ `TOOL_CALL_*`（工具），前端按类型增量渲染
+- **07 两套实现（对照学习）**：
+  - **官方版**（`07-streaming-ag-ui.ts` + `src/agui/graph.ts`）：用 `@ag-ui/langgraph` 的
+    `LangGraphAgent`。它只是客户端，必须连一个 LangGraph Platform server，所以是**双进程**：
+    `pnpm run 07:server`（`langgraphjs dev` 起 :2024）+ `pnpm run 07`（SSE 服务 :8787）。
+    转换交给官方库，最贴官方生态。
+  - **手写版**（`07-streaming-ag-ui-manual.ts`）：进程内直接 `graph.stream(streamMode:["updates","messages"])`，
+    自己用状态机把 token 流翻译成 AG-UI 事件并编码 SSE。看得清协议细节，单进程跑。
+- **官方解析器只认特定 reasoning 格式**：`LangGraphAgent` 的 `resolveReasoningContent` 只识别
+  `content[0].type==='thinking'`（Anthropic）/ `'reasoning'`（LangChain 标准/OpenAI Responses）/
+  `additional_kwargs.reasoning.summary`（OpenAI legacy），**不读** DashScope/OpenAI 兼容接口的
+  `additional_kwargs.reasoning_content`（手写版正是读这个）。
+- **官方版让 DeepSeek 出 thinking 的办法**：用 `@langchain/anthropic` 指向 **DeepSeek 的 Anthropic 兼容端点**
+  （`anthropicApiUrl=https://api.deepseek.com/anthropic` + `thinking:{type:"enabled"}`），DeepSeek 便以
+  Anthropic `thinking` content block 流式返回思维链 → 被官方解析器识别为 `REASONING_*`。完整逐 token 思维链。
+- **环境变量污染坑（已排除）**：`@anthropic-ai/sdk` 有 credential chain，会从 `ANTHROPIC_BASE_URL` /
+  `ANTHROPIC_AUTH_TOKEN` 兜底解析。曾因全局装过第三方代理包（往 `~/.zshrc` 注入 `ANTHROPIC_BASE_URL` +
+  代理 token），`langgraph dev` 继承后干扰请求导致 401。卸载该包、清掉 `.zshrc` 注入后即正常，
+  `graph.ts` 无需再做特殊处理。若换机器仍遇到类似 401，优先排查 shell 里的 `ANTHROPIC_*` 变量。
+- **版本坑**：`@langchain/openai` 0.4.0 不暴露 reasoning_content、且流式 tool_calls 聚合失败；
+  升级到 v1（core 1.x + langgraph 1.x + openai 1.x，与 05-memory 对齐）后两者都正常
 
 ---
 
