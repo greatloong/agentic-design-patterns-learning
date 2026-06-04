@@ -1,7 +1,7 @@
 # Agent 系统性学习计划
 
 > 学习路径：LangGraph 底层原语 → Agentic Design Patterns (21章) → Claude Code 源码分析
-> 实践语言：TypeScript + LangGraph
+> 实践语言：TypeScript + LangGraph（主线）｜ Python + Pydantic AI（平行对照线）
 > LLM：DeepSeek API（兼容 OpenAI 协议）
 > 参考资料：
 >
@@ -22,6 +22,7 @@
 | 阶段五 | 工程化能力 (Ch.10-13)    | ⏳ 待开始 |
 | 阶段六 | 高级主题 (Ch.14-21)      | ⏳ 待开始 |
 | 阶段七 | 生产级实践 (Claude Code) | ⏳ 待开始 |
+| Python 线 | Pydantic AI 基础（对照阶段零） | ✅ 完成 |
 
 ---
 
@@ -72,6 +73,41 @@
   `graph.ts` 无需再做特殊处理。若换机器仍遇到类似 401，优先排查 shell 里的 `ANTHROPIC_*` 变量。
 - **版本坑**：`@langchain/openai` 0.4.0 不暴露 reasoning_content、且流式 tool_calls 聚合失败；
   升级到 v1（core 1.x + langgraph 1.x + openai 1.x，与 05-memory 对齐）后两者都正常
+
+---
+
+## Python 平行学习线：Pydantic AI 基础
+
+> package: `packages/01-python-pydanticai-basics`
+> 目标：用 **Python + Pydantic AI** 重走阶段零的 6 个基础主题，建立"同一套 Agent 概念在不同
+> 框架/语言里如何落地"的对照认知；顺带回炉 Python 工程化与语言特性。
+> 技术栈：`pydantic-ai`（完整版）+ `uv`（包管理）+ DashScope `deepseek-v4-pro`（兼容 OpenAI 协议）
+
+| #   | 主题（Pydantic AI）             | 文件                            | 对照阶段零 | 状态    |
+| --- | ------------------------------- | ------------------------------- | ---------- | ------- |
+| P.1 | Agent 与结构化输出              | `src/01_agent_basics.py`        | 0.1 State/Node/Edge | ✅ 完成 |
+| P.2 | 条件路由                        | `src/02_routing.py`             | 0.2 条件路由 | ✅ 完成 |
+| P.3 | ReAct Agent（工具 + 依赖注入）  | `src/03_react_tools.py`         | 0.3 ReAct  | ✅ 完成 |
+| P.4 | 消息历史与持久化                | `src/04_message_history.py`     | 0.4 Checkpointer | ✅ 完成 |
+| P.5 | Human-in-the-Loop（工具审批）   | `src/05_human_in_the_loop.py`   | 0.5 HITL   | ✅ 完成 |
+| P.6 | Streaming（流式 + 过程事件）    | `src/06_streaming.py`           | 0.6 Streaming | ✅ 完成 |
+
+### 关键概念笔记（框架对照）
+
+- **核心抽象差异**：LangGraph **以图为中心**（显式声明 State/Node/Edge）；Pydantic AI **以 Agent 为中心**
+  （模型+指令+工具+输出类型的容器，内部也跑一张 pydantic-graph 状态机，但默认隐藏）。
+- **结构化输出**是 Pydantic AI 的招牌：`output_type=BaseModel`，模型给的数据自动校验，不合规则回喂重试。
+- **ReAct 循环内置**：`@agent.tool` 注册工具后，"模型调用→执行→回喂→继续"的循环由框架托管，无需手搭。
+- **记忆 = 显式传 message_history**：对照 Checkpointer 的"框架托管自动存取"，Pydantic AI 是"你拿到消息、
+  自己决定存哪"，配 `ModelMessagesTypeAdapter` 序列化落盘即得手动版 Checkpointer。
+- **HITL = deferred tools**：高危工具标 `requires_approval=True`，run 以 `DeferredToolRequests` 中断，
+  人工审批后带 `DeferredToolResults` + 原 message_history 恢复。
+- **思考模型坑（已解决）**：`deepseek-v4-pro` 是 thinking 模型，DashScope 思考模式禁止 `tool_choice=required`，
+  与 pydantic-ai 默认的工具输出模式冲突 → 结构化输出改用 `PromptedOutput`（schema 进提示词、返回 JSON 文本再校验）。
+- **流式坑**：`output_type=str` 时 `run_stream` 把首段文字当最终结果、后续工具调用默认不执行；
+  要全过程可观测用 `run_stream_events()` / `agent.iter()`。
+- **工程化对照**：`uv`≈pnpm，`pyproject.toml`≈package.json，`uv.lock`≈pnpm-lock.yaml，`.venv/`≈node_modules/。
+  详见 `packages/01-python-pydanticai-basics/PYTHON_NOTES.md`。
 
 ---
 
@@ -176,14 +212,15 @@
 
 ```
 packages/
-├── 01-langgraph-basics/        ← 阶段零：LangGraph 基础
-├── 02-basic-workflows/         ← 阶段一：Ch.1-3
-├── 03-core-agent-patterns/     ← 阶段二：Ch.4-6
-├── 04-multi-agent/             ← 阶段三：Ch.7
-├── 05-memory/                  ← 阶段四：Ch.8-9
-├── 06-engineering/             ← 阶段五：Ch.10-13
-├── 07-advanced/                ← 阶段六：Ch.14-21
-└── 08-claude-code-analysis/    ← 阶段七：源码分析
+├── 01-langgraph-basics/            ← 阶段零：LangGraph 基础（TS 主线）
+├── 01-python-pydanticai-basics/    ← Python 线：Pydantic AI 基础（对照阶段零）
+├── 02-basic-workflows/             ← 阶段一：Ch.1-3
+├── 03-core-agent-patterns/         ← 阶段二：Ch.4-6
+├── 04-multi-agent/                 ← 阶段三：Ch.7
+├── 05-memory/                      ← 阶段四：Ch.8-9
+├── 06-engineering/                 ← 阶段五：Ch.10-13
+├── 07-advanced/                    ← 阶段六：Ch.14-21
+└── 08-claude-code-analysis/        ← 阶段七：源码分析
 ```
 
 ---
@@ -232,4 +269,4 @@ packages/
 
 ---
 
-_最后更新：2026-04-28_
+_最后更新：2026-06-04_
