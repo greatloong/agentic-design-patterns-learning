@@ -11,7 +11,39 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=2.1.0",
+    "ruff>=0.15.16",
 ]
 
 [tool.uv]
 package = false
+
+[tool.ruff]
+# 最低支持版本以 requires-python 为准（pyupgrade 等规则据此决定可用的新语法）
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle 错误
+    "W",   # pycodestyle 警告
+    "F",   # pyflakes（未使用导入/变量等）
+    "I",   # isort（导入排序）
+    "UP",  # pyupgrade（用更现代的语法）
+    "B",   # flake8-bugbear（易错写法）
+    "SIM", # flake8-simplify（可简化的写法）
+    "C4",  # flake8-comprehensions（推导式优化）
+]
+ignore = [
+    # 行宽交给 formatter 处理；大量中文长注释不强制换行，避免噪音
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+# src/shared 是本项目自己的包，单独归到 first-party 分组
+known-first-party = ["shared"]
+
+[tool.ruff.format]
+# 默认即贴近 Black 风格，这里显式声明保持一致
+quote-style = "double"
+indent-style = "space"

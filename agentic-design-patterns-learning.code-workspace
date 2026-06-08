@@ -1,0 +1,7 @@
+{
+  "folders": [
+    { "path": "." },
+    { "path": "packages/01-python-pydanticai-basics" }
+  ],
+  "settings": {}
+}

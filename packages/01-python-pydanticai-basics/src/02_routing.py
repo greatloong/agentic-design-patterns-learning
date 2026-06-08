@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
-
 from pydantic_ai import Agent, PromptedOutput
 
 from shared.model import get_model
@@ -37,8 +36,7 @@ router_agent = Agent(
     model,
     output_type=PromptedOutput(Routing),
     instructions=(
-        "你是客服分诊员。把用户消息归类为「技术支持」「账单」或「闲聊」之一，"
-        "并给出简短理由。"
+        "你是客服分诊员。把用户消息归类为「技术支持」「账单」或「闲聊」之一，并给出简短理由。"
     ),
 )
 

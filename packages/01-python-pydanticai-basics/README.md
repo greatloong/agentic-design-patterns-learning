@@ -68,6 +68,21 @@ uv run python src/05_human_in_the_loop.py
 uv run python src/06_streaming.py
 ```
 
+### 代码检查与格式化（Ruff）
+
+本包用 [Ruff](https://docs.astral.sh/ruff/)（astral 出品，和 `uv` 同一家）统一做 lint + 格式化 +
+import 排序，规则配置见 `pyproject.toml` 的 `[tool.ruff]`。
+
+```bash
+uv run ruff check .          # 检查
+uv run ruff check --fix .    # 检查并自动修复（含 import 排序）
+uv run ruff format .         # 格式化（≈ Black）
+uv run mypy src              # 类型检查
+```
+
+> 编辑器里建议装 Ruff 扩展（`charliermarsh.ruff`）+ Mypy 扩展（`ms-python.mypy-type-checker`），
+> 保存即检查。
+
 ## 踩坑记录（实战要点）
 
 - **思考模型 + 结构化输出的冲突**：`deepseek-v4-pro` 是思考（thinking）模型，DashScope 在思考模式下

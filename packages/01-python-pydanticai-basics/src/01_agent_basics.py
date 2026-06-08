@@ -15,11 +15,9 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-
 from pydantic_ai import Agent, PromptedOutput
 
 from shared.model import get_model
-
 
 # ---------- (1) 最朴素：纯文本输出 ----------
 # 不指定 output_type 时，默认就是 str。

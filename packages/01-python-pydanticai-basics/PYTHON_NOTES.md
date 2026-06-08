@@ -169,7 +169,202 @@ from shared.model import get_model
 
 ---
 
-## 三、和 TypeScript 仓库的速查对照
+## 三、面向对象（class 完整版）
+
+> 给从 JS/TS 回来的人：尽量配 JS 对照。本包用到的 `Deps`(@dataclass)、`CityInfo`(BaseModel)
+> 都是 class，这一节把 class 一次讲透。
+
+### 3.1 定义与实例化
+
+```python
+class Dog:
+    def __init__(self, name: str, age: int):   # 构造器(初始化,不是"创建")
+        self.name = name
+        self.age = age
+
+    def bark(self) -> str:                      # 实例方法,第一个参数永远是 self
+        return f"{self.name} 汪!"
+
+d = Dog("旺财", 3)   # 实例化,无 new
+```
+
+- `self` = 实例自身（≈ JS 的 `this`），但 Python 要求**显式**写成方法第一个参数。
+- 实例化用 `Dog(...)`，**没有 `new`**。
+
+### 3.2 类属性 vs 实例属性
+
+```python
+class Dog:
+    species = "Canis"          # 类属性:所有实例共享
+    def __init__(self, name):
+        self.name = name       # 实例属性:每个实例独立
+```
+
+查找顺序：**实例 → 类 → 父类**。
+
+⚠️ 经典陷阱：可变类型当类属性会被所有实例共享：
+
+```python
+class Box:
+    items = []           # 所有 Box 共用同一个 list!
+b1, b2 = Box(), Box()
+b1.items.append(1)
+b2.items                 # [1] —— 被污染。正确做法是放进 __init__ 成为实例属性
+```
+
+> 这也解释了上一节的困惑：普通类里 `name: str = X` 本是**类属性**；但 `CityInfo` 继承
+> `BaseModel`，其元类把这些注解改造成了**带校验的实例字段**——所以才"像成员一样"每实例独立。
+
+### 3.3 三种方法：实例 / 类 / 静态
+
+```python
+class Pizza:
+    count = 0
+    def __init__(self, size: int):
+        self.size = size
+        Pizza.count += 1
+
+    def area(self) -> float:                 # 实例方法:操作具体实例(self)
+        return 3.14 * (self.size / 2) ** 2
+
+    @classmethod
+    def margherita(cls):                     # 类方法:操作类(cls),常当"命名构造器/工厂"
+        return cls(size=30)
+
+    @staticmethod
+    def inch_to_cm(inch: float) -> float:    # 静态方法:不碰 self/cls,只是挂在类下的函数
+        return inch * 2.54
+```
+
+- 实例方法 → `self`；`@classmethod` → `cls`（类本身）；`@staticmethod` → 都不接收。
+
+### 3.4 `@property`：把方法伪装成属性
+
+```python
+class Circle:
+    def __init__(self, r: float):
+        self._r = r                 # 约定:下划线开头 = 内部用
+
+    @property
+    def radius(self) -> float:      # 读:c.radius(不加括号)
+        return self._r
+
+    @radius.setter
+    def radius(self, value: float): # 写:c.radius = 5,可在此校验
+        if value < 0:
+            raise ValueError("半径不能为负")
+        self._r = value
+
+    @property
+    def area(self) -> float:        # 只读"计算属性"
+        return 3.14 * self._r ** 2
+```
+
+> 新版 `result.usage`（属性不是方法）底层就是 `@property`。
+
+### 3.5 封装约定（Python 没有真 private）
+
+靠**命名约定**，不靠关键字：
+
+| 写法 | 含义 |
+|------|------|
+| `name` | 公开 |
+| `_name` | "内部用,别动"（约定,无强制） |
+| `__name` | 名称改写 → `_类名__name`，避免子类冲突，**不是真 private** |
+
+没有 `public/private/protected` 关键字。
+
+### 3.6 继承
+
+```python
+class Animal:
+    def __init__(self, name: str):
+        self.name = name
+    def speak(self) -> str:
+        return "..."
+
+class Cat(Animal):                  # 括号里写父类 = 继承
+    def __init__(self, name: str, indoor: bool):
+        super().__init__(name)      # 调父类构造器
+        self.indoor = indoor
+    def speak(self) -> str:         # 重写(override),无需任何装饰器
+        return "喵"
+```
+
+- `super()` 访问父类实现；重写无需 `@Override`。
+- 支持**多继承** `class C(A, B)`，方法解析顺序由 **MRO**（C3 线性化）决定，`C.__mro__` 可查。
+- `CityInfo(BaseModel)` 本质就是继承。
+
+### 3.7 常用 dunder（魔术方法）
+
+解释器在特定语法/时机自动调用的 `__xxx__`：
+
+```python
+class Money:
+    def __init__(self, amount: int):
+        self.amount = amount
+    def __repr__(self) -> str:               # print()/调试显示
+        return f"Money({self.amount})"
+    def __eq__(self, other) -> bool:         # ==
+        return isinstance(other, Money) and self.amount == other.amount
+    def __add__(self, other) -> "Money":     # +
+        return Money(self.amount + other.amount)
+```
+
+常见还有：`__str__`、`__hash__`、`__len__`、`__iter__`、`__call__`（实例当函数调）、
+`__enter__/__exit__`（支持 `with`）。`@dataclass` 和 `BaseModel` 会**自动生成** `__init__/__repr__/__eq__`。
+
+### 3.8 数据类三档进化（本包都用到）
+
+```python
+# 档1 纯手写
+class P1:
+    def __init__(self, name: str, age: int = 0):
+        self.name, self.age = name, age
+
+# 档2 @dataclass:自动 __init__/__repr__/__eq__,不校验 —— 见 Deps
+from dataclasses import dataclass
+@dataclass
+class P2:
+    name: str
+    age: int = 0
+
+# 档3 Pydantic BaseModel:自动生成 + 运行时校验 + JSON schema —— 见 CityInfo
+from pydantic import BaseModel
+class P3(BaseModel):
+    name: str
+    age: int = 0
+```
+
+选择标准：内部可信数据用 `@dataclass`（轻量）；外部/LLM 不可信数据用 `BaseModel`（校验+schema）；
+需要复杂行为而非单纯装数据时用纯 class。
+
+### 3.9 抽象类与 Protocol（接口的两种思路）
+
+```python
+# 方式A 抽象基类:显式继承 + 强制实现
+from abc import ABC, abstractmethod
+class Storage(ABC):
+    @abstractmethod
+    def save(self, data: str) -> None: ...   # 子类不实现则无法实例化
+
+# 方式B Protocol:鸭子类型/结构化类型(≈ TS 的 interface)
+from typing import Protocol
+class Saveable(Protocol):
+    def save(self, data: str) -> None: ...   # 谁有 save 谁就算 Saveable,无需继承
+```
+
+`Protocol` 最接近 TS 的 `interface`——**结构匹配**而非显式继承。
+
+### 3.10 进阶小点
+
+- `__slots__ = ("x", "y")`：固定字段、禁用 `__dict__`，省内存、防乱加属性。
+- 类本身也是**对象**：可赋值、当参数传——`deps_type=Deps` 就是"把类当值传"。
+- `@dataclass(frozen=True)`：造不可变对象。
+
+---
+
+## 四、和 TypeScript 仓库的速查对照
 
 | 概念 | 本包（Python + uv） | TS 各包（pnpm） |
 |------|---------------------|-----------------|
