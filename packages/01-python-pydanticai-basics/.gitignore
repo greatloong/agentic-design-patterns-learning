@@ -1,8 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-.env
-*.local
-.mypy_cache/
-# 04 消息历史持久化示例落盘文件
-conversation.json

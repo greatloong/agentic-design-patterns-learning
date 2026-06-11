@@ -1,5 +1,22 @@
+# Node / TypeScript
 node_modules/
 dist/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# 环境变量与本地文件
 .env
 *.local
+
+# 工具缓存
 .mem0/
+
+# macOS 系统文件
+.DS_Store
+
+# 示例运行产生的落盘文件 (01-python-pydanticai-basics 04)
+conversation.json
