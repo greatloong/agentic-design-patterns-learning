@@ -20,3 +20,7 @@ __pycache__/
 
 # 示例运行产生的落盘文件 (01-python-pydanticai-basics 04)
 conversation.json
+
+# 练习运行产生的 heuristics 落盘数据 (05-memory 10)：
+# 不纳入版本控制，方便对比"无 heuristics"与"有 heuristics"两种情况
+packages/05-memory/heuristics/

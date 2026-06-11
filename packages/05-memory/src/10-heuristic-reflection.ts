@@ -1,51 +1,54 @@
 /**
- * 10 - Heuristic Reflection：ERL 风格——从任务结果中反思提炼经验
+ * 10 - Heuristic Reflection：投资分析 Agent 从任务结果中反思提炼经验（ERL 风格）
  *
  * ── 与 09 的区别 ─────────────────────────────────────────────────────────
  *
  *   09: 用户说"太正式了" → 提炼偏好规则（用户教 Agent 做人）
- *   10: Agent 执行失败 → 自己反思为什么 → 提炼策略规则（Agent 自己学做事）
+ *   10: Agent 执行投资分析 → 自己反思流程缺陷与依据可靠性 → 提炼策略规则
  *
- * ── 核心流程（ERL 论文简化版）────────────────────────────────────────────
+ * ── 架构（对应 ERL 论文的 Hot/Cold Path 分离）──────────────────────────────
  *
- *   Phase 1 — 离线积累：
- *     执行任务 → 获得结果（成功/失败）
- *     → LLM 反思 trajectory
- *     → 提炼为 Trigger-Action Heuristic
- *     → 向量化存入 Heuristic Pool
+ *   Hot Path（在线，延迟敏感）:
+ *     LangGraph ReAct loop: agent node ⇄ tools node (web_search)
+ *     ├─ Tracer: trajectory 内嵌于 graph state，节点执行时零成本追加记录
+ *     └─ agent node: 分层 system prompt
+ *          Layer 1 Core（不可变核心指令）
+ *          Layer 2 Learned Heuristics（每次执行时从本地文件动态加载）
  *
- *   Phase 2 — 在线使用：
- *     新任务到来
- *     → 用任务描述作为 query，Embedding 检索 Top-K 相关 Heuristic
- *     → 注入 System Prompt
- *     → Agent 带着经验执行
+ *   Cold Path（离线，延迟不敏感）:
+ *     任务结束后 → 反思 LLM 分析 trajectory，两个维度：
+ *       A. 执行流程改进：报错、重复调用、低效查询、死循环
+ *       B. 结论依据真实性：论断是否有搜索结果出处、是否把推测当事实、
+ *          是否用过时数据 → 提炼提升分析准确性的规则
+ *     → Heuristic 直接写入本地文件（无审核环节）
+ *     → 最多保留 20 条，FIFO 淘汰最老的
  *
- * ── 质量控制：三种审查模式 ────────────────────────────────────────────────
+ * ── 运行 ─────────────────────────────────────────────────────────────────
  *
- *   模式 1 — 全自动（无审查）：反思 → 直接存入 production pool
- *     适合低风险场景（个人助手、内部工具）
- *
- *   模式 2 — Staged Rollout（分阶段上线）：
- *     反思 → 存入 shadow pool → 跑 N 次对比效果 → 正向才提升到 production
- *     ACE 框架的做法：shadow → staging → prod，检测到回归自动回滚
- *
- *   模式 3 — Human-in-the-Loop（人工审核）：
- *     反思 → 存入 pending pool → 人类审核 approve/reject/edit → 才进入 production
- *     适合金融、医疗、客服等不能出错的场景
- *
- * ── 本节演示 ──────────────────────────────────────────────────────────────
- *
- *   1. Agent 真实执行任务（ReAct loop + Mock Tools）→ Tracer 自动记录轨迹
- *   2. LLM-as-Judge 自动评估 outcome（不靠硬编码）
- *   3. 反思提炼 Heuristic → 质量控制审查（shadow / pending）
- *   4. 新任务带 Heuristic 指导执行 vs 无指导对比
+ *   pnpm run 10            正常运行（heuristics 跨运行累积，体现持续学习）
+ *   pnpm run 10 -- --fresh 清空 heuristic 文件后运行
  */
 
 import "dotenv/config";
-import { InMemoryStore } from "@langchain/langgraph";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ChatOpenAI } from "@langchain/openai";
-import { OpenAIEmbeddings } from "@langchain/openai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+} from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+import {
+  Annotation,
+  MessagesAnnotation,
+  StateGraph,
+  START,
+  END,
+} from "@langchain/langgraph";
 
 // ── 模型配置 ────────────────────────────────────────────────────────────
 
@@ -53,6 +56,7 @@ const llm = new ChatOpenAI({
   model: "deepseek-v4-pro",
   apiKey: process.env.DASHSCOPE_API_KEY,
   configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
+  streaming: true, // messages 流模式依赖模型 token streaming
 });
 
 const reflectionLlm = new ChatOpenAI({
@@ -62,556 +66,427 @@ const reflectionLlm = new ChatOpenAI({
   temperature: 0,
 });
 
-const embeddings = new OpenAIEmbeddings({
-  model: "text-embedding-v4",
-  dimensions: 512,
-  apiKey: process.env.DASHSCOPE_API_KEY,
-  configuration: {
-    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  },
-});
-
-// ── Heuristic Pool（向量化存储）────────────────────────────────────────
-
-const heuristicStore = new InMemoryStore({
-  index: {
-    dims: 512,
-    embeddings,
-  },
-});
-
-const HEURISTIC_NAMESPACE = ["heuristics", "task-agent"];
-
 // ══════════════════════════════════════════════════════════════════════════
-// 数据结构：带质量控制字段的 Heuristic
+// Heuristic 持久化：本地文件，最多 20 条，FIFO 淘汰最老的
 // ══════════════════════════════════════════════════════════════════════════
 
-type HeuristicStatus = "shadow" | "staging" | "production" | "pending" | "rejected";
+const DATA_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../heuristics",
+);
+const HEURISTIC_FILE = path.join(DATA_DIR, "heuristics-10.json");
+const MAX_HEURISTICS = 20;
 
 interface HeuristicEntry {
-  task: string;
-  outcome: "success" | "failure";
-  analysis: string;
+  id: string;
+  dimension: "flow" | "evidence"; // A 流程改进 | B 依据真实性
   trigger: string;
   action: string;
   rationale: string;
-  heuristicText: string;
-  // 质量控制字段
-  status: HeuristicStatus;
-  confidence: number;       // 0~1，初始 0.5
-  usedCount: number;        // 被检索注入的次数
-  validatedCount: number;   // 注入后任务成功的次数
+  sourceTask: string;
   createdAt: string;
-  lastUsedAt: string | null;
-  reviewNote?: string;      // 人工审核备注
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// Phase 1：执行任务 → 反思 → 提炼 Heuristic
-// ══════════════════════════════════════════════════════════════════════════
-
-interface TaskExecution {
-  task: string;
-  trajectory: string;
-  outcome: "success" | "failure";
-}
-
-const REFLECTION_PROMPT = `你是一个 AI Agent 的经验反思器。你需要分析一次任务执行的轨迹，提炼出可复用的经验规则。
-
-## 任务描述
-{task}
-
-## 执行轨迹
-{trajectory}
-
-## 执行结果
-{outcome}
-
-## 你的任务
-
-分析这次执行，提炼一条可迁移的 Heuristic（经验规则）。
-
-### 要求
-- 如果是失败：找到 Breakpoint（哪一步出错了），提炼"如何避免"
-- 如果是成功：找到关键决策（哪一步做对了），提炼"为什么有效"
-- 规则必须足够抽象，能适用于类似但不完全相同的任务
-- 不要太具体（绑定某个具体值），也不要太泛（"要小心"）
-
-### 输出格式（JSON）
-{
-  "analysis": "简要分析成功/失败原因（1-2句）",
-  "heuristic": {
-    "trigger": "IF [具体触发条件]",
-    "action": "THEN [具体行动建议]",
-    "rationale": "因为[原因]"
-  }
-}
-
-只输出 JSON。`;
-
-/**
- * 对一次任务执行进行反思，提炼 Heuristic 并存入 Pool
- * @param initialStatus 初始状态：决定走哪种审查模式
- *   - "production": 模式 1（全自动，直接生效）
- *   - "shadow": 模式 2（分阶段，先 shadow 验证）
- *   - "pending": 模式 3（人工审核）
- */
-async function reflectAndStore(
-  execution: TaskExecution,
-  initialStatus: HeuristicStatus = "shadow"
-): Promise<{ id: string; heuristicText: string }> {
-  const prompt = REFLECTION_PROMPT.replace("{task}", execution.task)
-    .replace("{trajectory}", execution.trajectory)
-    .replace("{outcome}", execution.outcome);
-
-  const resp = await reflectionLlm.invoke([new HumanMessage(prompt)]);
-  const content = (resp.content as string).trim();
-
-  let parsed: any;
+function loadHeuristics(): HeuristicEntry[] {
   try {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    parsed = JSON.parse(jsonMatch?.[0] || content);
+    return JSON.parse(fs.readFileSync(HEURISTIC_FILE, "utf-8"));
   } catch {
-    console.log("  ⚠️ 反思输出解析失败，跳过");
-    return { id: "", heuristicText: "" };
-  }
-
-  const heuristicText = `${parsed.heuristic.trigger} ${parsed.heuristic.action} (${parsed.heuristic.rationale})`;
-
-  const id = `h-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const entry: HeuristicEntry = {
-    task: execution.task,
-    outcome: execution.outcome,
-    analysis: parsed.analysis,
-    trigger: parsed.heuristic.trigger,
-    action: parsed.heuristic.action,
-    rationale: parsed.heuristic.rationale,
-    heuristicText,
-    status: initialStatus,
-    confidence: 0.5,
-    usedCount: 0,
-    validatedCount: 0,
-    createdAt: new Date().toISOString(),
-    lastUsedAt: null,
-  };
-
-  await heuristicStore.put(HEURISTIC_NAMESPACE, id, entry as any);
-  return { id, heuristicText };
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// 模式 2：Staged Rollout — Shadow → Validate → Promote
-// ══════════════════════════════════════════════════════════════════════════
-
-/**
- * 模拟 shadow 验证：检查规则在历史任务上是否有正向效果
- * 生产中这会跑真实的 A/B test 或 eval suite
- */
-async function validateInShadow(heuristicId: string): Promise<{
-  passed: boolean;
-  score: number;
-  reason: string;
-}> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: heuristicId,
-    limit: 100,
-  });
-  const entry = results.find((r) => r.key === heuristicId);
-  if (!entry) return { passed: false, score: 0, reason: "未找到规则" };
-
-  const value = entry.value as any as HeuristicEntry;
-
-  // 模拟验证逻辑：用 LLM 评估规则质量
-  const evalPrompt = `评估以下经验规则的质量（0-10分）：
-
-规则：${value.heuristicText}
-
-评判标准：
-1. 具体性（不是"要小心"这种废话）
-2. 可迁移性（能适用于类似场景，不绑定具体值）
-3. 可操作性（有明确的行动步骤）
-4. 无害性（不会导致错误行为）
-
-输出 JSON：{"score": 0-10, "reason": "一句话评价"}`;
-
-  const resp = await reflectionLlm.invoke([new HumanMessage(evalPrompt)]);
-  const content = (resp.content as string).trim();
-
-  try {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch?.[0] || content);
-    const passed = parsed.score >= 7; // 7 分以上才通过
-    return { passed, score: parsed.score, reason: parsed.reason };
-  } catch {
-    return { passed: false, score: 0, reason: "评估解析失败" };
+    return [];
   }
 }
 
-/**
- * 将通过验证的 Heuristic 从 shadow 提升到 production
- */
-async function promoteToProduction(heuristicId: string): Promise<boolean> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: "all",
-    limit: 100,
-  });
-  const entry = results.find((r) => r.key === heuristicId);
-  if (!entry) return false;
-
-  const value = entry.value as any as HeuristicEntry;
-  value.status = "production";
-  value.confidence = 0.7; // 通过验证后置信度提升
-
-  await heuristicStore.delete(HEURISTIC_NAMESPACE, heuristicId);
-  await heuristicStore.put(HEURISTIC_NAMESPACE, heuristicId, value as any);
-  return true;
+function addHeuristics(newEntries: HeuristicEntry[]): {
+  total: number;
+  evicted: number;
+} {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const all = [...loadHeuristics(), ...newEntries];
+  // FIFO：数组按插入顺序即时间顺序，超出上限时淘汰最早的
+  const evicted = Math.max(0, all.length - MAX_HEURISTICS);
+  const kept = all.slice(-MAX_HEURISTICS);
+  fs.writeFileSync(HEURISTIC_FILE, JSON.stringify(kept, null, 2), "utf-8");
+  return { total: kept.length, evicted };
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// 模式 3：Human-in-the-Loop — Pending → Approve/Reject/Edit
+// 工具：web_search（Brave Search API）
 // ══════════════════════════════════════════════════════════════════════════
 
-/**
- * 获取所有待审核的 Heuristic（供人类审核者查看）
- */
-async function getPendingHeuristics(): Promise<
-  Array<{ id: string; entry: HeuristicEntry }>
-> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: "pending review",
-    limit: 100,
-  });
 
-  return results
-    .filter((r) => (r.value as any).status === "pending")
-    .map((r) => ({ id: r.key, entry: r.value as any as HeuristicEntry }));
-}
-
-/**
- * 人工审核：Approve（通过）→ 进入 production
- */
-async function approveHeuristic(
-  heuristicId: string,
-  reviewNote?: string
-): Promise<void> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: "all",
-    limit: 100,
-  });
-  const entry = results.find((r) => r.key === heuristicId);
-  if (!entry) return;
-
-  const value = entry.value as any as HeuristicEntry;
-  value.status = "production";
-  value.confidence = 0.8; // 人工审核通过，高置信度
-  value.reviewNote = reviewNote || "人工审核通过";
-
-  await heuristicStore.delete(HEURISTIC_NAMESPACE, heuristicId);
-  await heuristicStore.put(HEURISTIC_NAMESPACE, heuristicId, value as any);
-}
-
-/**
- * 人工审核：Reject（拒绝）→ 标记为 rejected，不参与检索
- */
-async function rejectHeuristic(
-  heuristicId: string,
-  reviewNote: string
-): Promise<void> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: "all",
-    limit: 100,
-  });
-  const entry = results.find((r) => r.key === heuristicId);
-  if (!entry) return;
-
-  const value = entry.value as any as HeuristicEntry;
-  value.status = "rejected";
-  value.confidence = 0;
-  value.reviewNote = reviewNote;
-
-  await heuristicStore.delete(HEURISTIC_NAMESPACE, heuristicId);
-  await heuristicStore.put(HEURISTIC_NAMESPACE, heuristicId, value as any);
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// Phase 2：检索（只取 production 状态的）
-// ══════════════════════════════════════════════════════════════════════════
-
-/**
- * 检索与当前任务相关的 Top-K Heuristic（只取 production 且 confidence > 阈值）
- */
-async function retrieveHeuristics(
-  taskDescription: string,
-  topK: number = 5
-): Promise<string[]> {
-  const results = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: taskDescription,
-    limit: topK * 3, // 多取一些，后面过滤
-  });
-
-  return results
-    .filter((r) => {
-      const v = r.value as any;
-      return v.status === "production" && v.confidence > 0.3;
-    })
-    .slice(0, topK)
-    .map((r) => (r.value as any).heuristicText);
-}
-
-/**
- * 带 Heuristic 指导执行任务
- */
-async function executeWithHeuristics(
-  task: string,
-  useHeuristics: boolean
-): Promise<string> {
-  let systemPrompt = `你是一个任务执行 Agent。用户会给你一个任务，你需要思考执行步骤并给出方案。
-请先列出你的执行步骤（Step 1, 2, 3...），然后给出最终结果。`;
-
-  if (useHeuristics) {
-    const heuristics = await retrieveHeuristics(task);
-    if (heuristics.length > 0) {
-      systemPrompt += `\n\n## 来自过去经验的指导（执行时请参考）：\n${heuristics.map((h, i) => `${i + 1}. ${h}`).join("\n")}`;
+const webSearch = tool(
+  async ({ query }: { query: string }) => {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`;
+    const resp = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "X-Subscription-Token": process.env.BRAVE_API_KEY!,
+      },
+    });
+    if (!resp.ok) {
+      throw new Error(`Brave API ${resp.status}: ${await resp.text()}`);
     }
-  }
 
-  const resp = await llm.invoke([
-    new SystemMessage(systemPrompt),
-    new HumanMessage(task),
-  ]);
+    const data: any = await resp.json();
+    const results = data.web?.results ?? [];
+    if (results.length === 0) return `搜索"${query}"未找到结果`;
 
-  return resp.content as string;
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// Mock Tool Environment：模拟电商 Agent 的工具集
-// ══════════════════════════════════════════════════════════════════════════
-
-interface ToolCall {
-  tool: string;
-  args: Record<string, any>;
-}
-
-interface ToolResult {
-  tool: string;
-  args: Record<string, any>;
-  result: string;
-  isError: boolean;
-}
-
-/**
- * 模拟电商 API 环境
- * 故意设计一些"坑"：噪声数据、参数格式要求、歧义等
- */
-const MOCK_TOOLS: Record<string, (args: Record<string, any>) => { result: string; isError: boolean }> = {
-  "UserAPI.resolve": ({ identifier }) => {
-    if (/^U\d+$/.test(identifier)) {
-      return { result: `用户信息: {id: "${identifier}", name: "张三", email: "zhang3@test.com", phone: "138xxxx1234"}`, isError: false };
-    }
-    if (identifier === "张三") {
-      return { result: `Error 400: identifier 必须是用户ID格式(U+数字)，不接受姓名。请先调用 UserAPI.searchByName`, isError: true };
-    }
-    return { result: `Error 404: 用户 ${identifier} 不存在`, isError: true };
+    return results
+      .slice(0, 5)
+      .map((r: any, i: number) => {
+        const desc = (r.description ?? "").replace(/<[^>]+>/g, "");
+        const age = r.page_age ? ` (${r.page_age.slice(0, 10)})` : "";
+        return `${i + 1}. ${r.title}${age}\n   来源: ${r.url}\n   ${desc}`;
+      })
+      .join("\n");
   },
-
-  "UserAPI.searchByName": ({ name }) => {
-    const users: Record<string, string> = { "张三": "U12345", "李四": "U67890" };
-    return users[name]
-      ? { result: `找到用户: {name: "${name}", userId: "${users[name]}"}`, isError: false }
-      : { result: `未找到名为"${name}"的用户`, isError: true };
+  {
+    name: "web_search",
+    description:
+      "搜索互联网获取最新的财经/市场/公司信息。每次输入一个具体的查询关键词。",
+    schema: z.object({
+      query: z
+        .string()
+        .describe("搜索关键词，如 'NVDA stock price earnings 2026'"),
+    }),
   },
+);
 
-  "UserAPI.getPreferences": ({ userId }) => {
-    return { result: `用户偏好: {priceRange: "200-500", brands: ["华为","小米"], categories: ["数码","运动"], notificationMethod: "短信"}`, isError: false };
-  },
-
-  "SearchAPI.search": ({ query, filters }) => {
-    if (query.includes("蓝牙耳机")) {
-      return {
-        result: `搜索结果 (共18条):
-  1. [耳机] Sony WF-C500 运动蓝牙耳机 ¥299 (评分4.5, 标签:运动,防水)
-  2. [耳机] 漫步者 TWS1 蓝牙耳机 ¥129 (评分4.2, 标签:日常,性价比)
-  3. [音箱] JBL GO3 蓝牙音箱 ¥259 (评分4.7, 标签:户外) ← 类目:音箱,非耳机
-  4. [耳机] AirPods Pro 2 ¥1599 (评分4.9, 标签:降噪) ← 超出预算
-  5. [配件] 耳机收纳盒 ¥29 (标签:配件) ← 类目:配件,非耳机
-  6. [耳机] 华为 FreeBuds SE3 ¥249 (评分4.3, 标签:运动,防汗)
-  7. [耳机] Beats Fit Pro ¥899 (评分4.6, 标签:运动) ← 超出预算
-  8. [线材] 3.5mm耳机转接线 ¥15 ← 完全不相关`,
-        isError: false,
-      };
-    }
-    if (query.includes("手机壳") || query.includes("iPhone")) {
-      return {
-        result: `搜索结果 (共20条):
-  1. [手机壳] iPhone 15 MagSafe 透明壳 ¥89
-  2. [贴膜] iPhone 15 钢化膜 ¥29 ← 类目:贴膜,非手机壳
-  3. [手机壳] iPhone 14 硅胶壳 ¥59 ← 型号不匹配
-  4. [手机壳] iPhone 15 防摔壳 ¥129
-  5. [保护壳] MacBook Air 保护壳 ¥199 ← 完全不相关
-  6. [手机壳] iPhone 15 Pro Max 皮质壳 ¥199`,
-        isError: false,
-      };
-    }
-    return { result: `搜索"${query}"返回 0 条结果`, isError: false };
-  },
-
-  "OrderAPI.getRecent": ({ userId, limit }) => {
-    return {
-      result: `最近 ${limit || 5} 笔订单:
-  - ORD-001: 蓝牙耳机 Sony WF-C500 ¥299 (3天前, 已签收)
-  - ORD-002: 充电宝 小米20000mAh ¥149 (5天前, 已签收)
-  - ORD-003: Type-C数据线 ¥19 (7天前, 已签收)`,
-      isError: false,
-    };
-  },
-
-  "OrderAPI.getStatus": ({ orderId }) => {
-    if (!orderId || !orderId.startsWith("ORD-")) {
-      return { result: `Error 400: orderId 格式错误，需要 ORD-xxx 格式`, isError: true };
-    }
-    return { result: `订单 ${orderId} 状态: 已签收 (签收时间: 2026-05-28)`, isError: false };
-  },
-
-  "RefundAPI.create": ({ orderId, reason }) => {
-    return { result: `退货单已创建: RF-${Date.now().toString().slice(-4)}, 订单: ${orderId}, 原因: ${reason}`, isError: false };
-  },
-
-  "RecommendAPI.rank": ({ items, userProfile, context }) => {
-    return { result: `重排序完成，按相关性排序结果已返回（基于用户偏好 + 场景匹配）`, isError: false };
-  },
-
-  "MessageAPI.send": ({ userId, content, channel }) => {
-    if (!channel) {
-      return { result: `Error 400: 缺少 channel 参数（sms/push/email）`, isError: true };
-    }
-    return { result: `消息已通过${channel}发送给用户 ${userId}`, isError: false };
-  },
+const TOOLS_BY_NAME: Record<string, typeof webSearch> = {
+  web_search: webSearch,
 };
 
-const TOOL_LIST_DESC = Object.keys(MOCK_TOOLS)
-  .map((name) => `- ${name}`)
-  .join("\n");
+const llmWithTools = llm.bindTools([webSearch]);
 
 // ══════════════════════════════════════════════════════════════════════════
-// Agent Executor：ReAct-style 循环，自动记录 Trajectory
+// Graph State：messages + trajectory（Hot Path Tracer 的载体）
 // ══════════════════════════════════════════════════════════════════════════
 
-const AGENT_SYSTEM_PROMPT = `你是一个电商客服 Agent，拥有以下工具：
+const GraphState = Annotation.Root({
+  ...MessagesAnnotation.spec,
+  // Tracer：每个节点把自己做的事 append 进来，零 LLM 成本
+  trajectory: Annotation<string[]>({
+    reducer: (a, b) => a.concat(b),
+    default: () => [],
+  }),
+  loopCount: Annotation<number>({
+    reducer: (_, b) => b,
+    default: () => 0,
+  }),
+});
 
-${TOOL_LIST_DESC}
+type State = typeof GraphState.State;
 
-## 工具调用规则
-每一步只能调用一个工具。输出格式：
-Action: ToolName({"param": "value"})
+const MAX_LOOPS = 6;
 
-如果任务已完成，输出：
-Final: [最终结果摘要]
+// ══════════════════════════════════════════════════════════════════════════
+// 分层 System Prompt：Core（不可变）+ Learned Heuristics（动态加载）
+// ══════════════════════════════════════════════════════════════════════════
 
-## 重要
-- 每次只输出一个 Action 或一个 Final
-- 不要输出解释，只输出 Action/Final 行`;
+const CORE_PROMPT = `你是一个投资分析 Agent。用户会给你一个投资分析任务。
 
-const MAX_STEPS = 8;
+## 核心要求（不可变）
+- 用 web_search 工具收集最新信息（股价、财报、新闻、分析师观点）
+- 每次搜索用具体、聚焦的关键词；信息足够后停止搜索
+- 最终输出：明确的 买入/持有/卖出 倾向 + 核心依据（标注信息来源）
+- 这不是投资建议，仅为研究分析`;
 
-/**
- * 执行单个任务，返回完整轨迹（动态生成，非硬编码）
- */
-async function runAgentTask(task: string): Promise<TaskExecution> {
-  const steps: string[] = [];
-  const messages: any[] = [
-    new SystemMessage(AGENT_SYSTEM_PROMPT),
-    new HumanMessage(`任务: ${task}`),
-  ];
+function buildLayeredSystemPrompt(): {
+  prompt: string;
+  loadedCount: number;
+} {
+  // Layer 2：每次调用时从本地文件动态加载（cold path 的学习成果即时生效）
+  const heuristics = loadHeuristics();
 
-  let finalResult = "";
-
-  for (let step = 1; step <= MAX_STEPS; step++) {
-    const resp = await llm.invoke(messages);
-    const output = (resp.content as string).trim();
-
-    // 检查是否结束
-    const finalMatch = output.match(/Final:\s*(.+)/s);
-    if (finalMatch) {
-      finalResult = finalMatch[1].trim();
-      steps.push(`Step ${step}: [完成] ${finalResult}`);
-      break;
-    }
-
-    // 解析 Action
-    const actionMatch = output.match(/Action:\s*(\w+(?:\.\w+)?)\((.+)\)/s);
-    if (!actionMatch) {
-      steps.push(`Step ${step}: [Agent 输出异常] ${output.slice(0, 100)}`);
-      messages.push(resp, new HumanMessage("请严格按格式输出 Action 或 Final。"));
-      continue;
-    }
-
-    const toolName = actionMatch[1];
-    let toolArgs: Record<string, any> = {};
-    try {
-      toolArgs = JSON.parse(actionMatch[2]);
-    } catch {
-      toolArgs = { raw: actionMatch[2] };
-    }
-
-    // 调用 Mock Tool
-    const toolFn = MOCK_TOOLS[toolName];
-    let toolResult: ToolResult;
-
-    if (!toolFn) {
-      toolResult = { tool: toolName, args: toolArgs, result: `Error: 工具 ${toolName} 不存在`, isError: true };
-    } else {
-      const { result, isError } = toolFn(toolArgs);
-      toolResult = { tool: toolName, args: toolArgs, result, isError };
-    }
-
-    // 记录轨迹
-    const argStr = JSON.stringify(toolArgs);
-    const errorTag = toolResult.isError ? " [ERROR]" : "";
-    steps.push(`Step ${step}: 调用 ${toolName}(${argStr})${errorTag}\n  → ${toolResult.result}`);
-
-    // 追加到对话
-    messages.push(resp, new HumanMessage(`Observation: ${toolResult.result}`));
+  let prompt = CORE_PROMPT;
+  if (heuristics.length > 0) {
+    const lines = heuristics
+      .map((h, i) => `${i + 1}. [${h.dimension}] ${h.trigger} ${h.action}`)
+      .join("\n");
+    prompt += `\n\n## 来自过往任务反思的经验规则（Learned Layer，动态加载）\n${lines}`;
   }
-
-  if (!finalResult && steps.length >= MAX_STEPS) {
-    steps.push(`[超过最大步数 ${MAX_STEPS}，强制终止]`);
-  }
-
-  const trajectory = steps.join("\n");
-
-  // LLM-as-Judge 评估 outcome
-  const outcome = await evaluateOutcome(task, trajectory);
-
-  return { task, trajectory, outcome };
+  return { prompt, loadedCount: heuristics.length };
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Graph Nodes（Hot Path）
+// ══════════════════════════════════════════════════════════════════════════
+
+async function agentNode(state: State): Promise<Partial<State>> {
+  const { prompt, loadedCount } = buildLayeredSystemPrompt();
+  const loop = state.loopCount + 1;
+
+  const resp = (await llmWithTools.invoke([
+    new SystemMessage(prompt),
+    ...state.messages,
+  ])) as AIMessage;
+
+  const traces: string[] = [];
+  if (loop === 1) {
+    traces.push(
+      `[Tracer] agent 启动，Learned Layer 注入 ${loadedCount} 条 heuristic`,
+    );
+  }
+
+  if (resp.tool_calls && resp.tool_calls.length > 0) {
+    for (const tc of resp.tool_calls) {
+      traces.push(`[决策] 调用 ${tc.name}(${JSON.stringify(tc.args)})`);
+    }
+  } else {
+    const text =
+      typeof resp.content === "string"
+        ? resp.content
+        : JSON.stringify(resp.content);
+    traces.push(`[最终结论]\n${text}`);
+  }
+
+  return { messages: [resp], trajectory: traces, loopCount: loop };
+}
+
+async function toolsNode(state: State): Promise<Partial<State>> {
+  const last = state.messages.at(-1) as AIMessage;
+  const outputs: ToolMessage[] = [];
+  const traces: string[] = [];
+
+  for (const tc of last.tool_calls ?? []) {
+    const fn = TOOLS_BY_NAME[tc.name];
+    try {
+      if (!fn) throw new Error(`工具 ${tc.name} 不存在`);
+      const result = (await fn.invoke(tc.args as any)) as string;
+      traces.push(
+        `[工具] ${tc.name}(${JSON.stringify(tc.args)})\n  → ${result.slice(0, 600)}`,
+      );
+      outputs.push(new ToolMessage({ content: result, tool_call_id: tc.id! }));
+    } catch (e: any) {
+      traces.push(`[工具][ERROR] ${tc.name} → ${e.message}`);
+      outputs.push(
+        new ToolMessage({
+          content: `Error: ${e.message}`,
+          tool_call_id: tc.id!,
+        }),
+      );
+    }
+  }
+
+  return { messages: outputs, trajectory: traces };
+}
+
+function shouldContinue(state: State): "tools" | typeof END {
+  const last = state.messages.at(-1) as AIMessage;
+  if (state.loopCount >= MAX_LOOPS) {
+    return END; // 防失控：超过最大循环数强制结束
+  }
+  return last.tool_calls && last.tool_calls.length > 0 ? "tools" : END;
+}
+
+const graph = new StateGraph(GraphState)
+  .addNode("agent", agentNode)
+  .addNode("tools", toolsNode)
+  .addEdge(START, "agent")
+  .addConditionalEdges("agent", shouldContinue, ["tools", END])
+  .addEdge("tools", "agent")
+  .compile();
+
 /**
- * LLM-as-Judge：评估任务执行质量
+ * Hot Path：执行任务（streaming 输出），返回轨迹 + 最终结论
+ *
+ * 流式输出策略（只给提示，不刷屏）：
+ *   - thinking token：仅在本 turn 首次出现时打印一行「💭 思考中…」提示，
+ *     不展示具体思考内容（太长、会刷屏）
+ *   - tool_call 参数：仅在本 turn 首次出现时打印一行「🔧 调用工具…」提示，
+ *     完整的调用参数随后由 [决策] 行干净展示
+ *   - 正文 token：正常流式输出
+ *   - [决策] / [工具] 等结构化行：用 console.log 正常打印
  */
-async function evaluateOutcome(
-  task: string,
-  trajectory: string
-): Promise<"success" | "failure"> {
-  const evalPrompt = `你是一个 QA 评估员。判断以下任务执行是否成功。
+async function runTask(task: string): Promise<{
+  trajectory: string;
+  finalAnswer: string;
+}> {
+  const stream = await graph.stream(
+    { messages: [new HumanMessage(task)] },
+    { recursionLimit: 30, streamMode: ["messages", "updates"] },
+  );
+
+  const trajectoryLines: string[] = [];
+  let finalAnswer = "";
+
+  // 当前 agent turn 的状态（updates 事件到达时重置）
+  let reasoningHinted = false; // 本 turn 是否已打印「思考中」提示
+  let toolHinted = false; // 本 turn 是否已打印「调用工具」提示
+  let textStreamed = false;
+
+  for await (const item of stream) {
+    const [mode, payload] = item as [string, any];
+
+    if (mode === "messages") {
+      const [chunk, meta] = payload as [any, Record<string, any>];
+      // 只处理 agent 节点的 AI 输出；ToolMessage 等不在此流式打印
+      if (meta?.langgraph_node !== "agent") continue;
+      const type = chunk.getType?.() ?? chunk._getType?.();
+      if (type !== "ai") continue;
+
+      // 1) thinking token：本 turn 首次出现时打印一次提示，不展示具体内容
+      const reasoning = chunk.additional_kwargs?.reasoning_content;
+      if (reasoning) {
+        if (!reasoningHinted) {
+          console.log("  💭 思考中…");
+          reasoningHinted = true;
+        }
+        continue;
+      }
+
+      // 2) tool_call_chunks：本 turn 首次出现时打印一次提示（完整参数见后续 [决策] 行）
+      if (chunk.tool_call_chunks?.length > 0 && !chunk.content) {
+        if (!toolHinted) {
+          console.log("  🔧 调用工具…");
+          toolHinted = true;
+        }
+        continue;
+      }
+
+      // 3) 正文 token：正常流式输出
+      const text =
+        typeof chunk.content === "string"
+          ? chunk.content
+          : Array.isArray(chunk.content)
+            ? chunk.content
+                .map((b: any) => (typeof b === "string" ? b : (b?.text ?? "")))
+                .join("")
+            : "";
+      if (text) {
+        if (!textStreamed) process.stdout.write("\n");
+        textStreamed = true;
+        process.stdout.write(text);
+      }
+    } else if (mode === "updates") {
+      const update = payload as Record<string, any>;
+
+      if (update.agent) {
+        const traces: string[] = update.agent.trajectory ?? [];
+        trajectoryLines.push(...traces);
+
+        for (const t of traces) {
+          if (t.startsWith("[最终结论]")) {
+            finalAnswer = t.replace(/^\[最终结论\]\n?/, "");
+            if (textStreamed) process.stdout.write("\n"); // 流式正文收尾
+          } else {
+            // [Tracer] / [决策] 行：完整 tool call 的干净展示
+            console.log(`  ${t}`);
+          }
+        }
+        // 重置 turn 状态
+        reasoningHinted = false;
+        toolHinted = false;
+        textStreamed = false;
+      }
+
+      if (update.tools) {
+        const traces: string[] = update.tools.trajectory ?? [];
+        trajectoryLines.push(...traces);
+        for (const t of traces) {
+          // live 显示截断到 200 字符；完整 600 字符版本保留在 trajectory 供反思
+          const firstLine = t.split("\n")[0];
+          const body = t.slice(firstLine.length).replace(/\s+/g, " ").trim();
+          console.log(`  ${firstLine}`);
+          if (body)
+            console.log(
+              `    ${body.slice(0, 200)}${body.length > 200 ? "…" : ""}`,
+            );
+        }
+      }
+    }
+  }
+
+  const trajectory = trajectoryLines
+    .map((t, i) => `Step ${i + 1}: ${t}`)
+    .join("\n");
+
+  return { trajectory, finalAnswer: finalAnswer || "（无最终结论）" };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Cold Path：反思提炼 Heuristic（两个维度，无审核，直接入池）
+// ══════════════════════════════════════════════════════════════════════════
+
+const REFLECTION_PROMPT = `你是一个投资分析 Agent 的经验反思器。分析以下任务执行轨迹，提炼可复用的经验规则。
 
 ## 任务
-${task}
+{task}
 
-## 执行轨迹
-${trajectory}
+## 执行轨迹（含每次搜索的关键词、返回结果、最终结论）
+{trajectory}
 
-## 评判标准
-- 任务目标是否达成？
-- 过程中是否有明显错误（调错API、推荐不相关商品、未确认就操作）？
-- 如果有错误但最终修正了，仍算 failure（因为过程低效）
-- 如果顺利完成且结果质量高，算 success
+## 你的任务：从两个维度反思
 
-## 输出
-只输出一个词: success 或 failure`;
+### 维度 A — 执行流程改进（dimension: "flow"）
+- 工具调用是否有报错、重复搜索、关键词过宽/过窄导致结果质量差？
+- 是否搜索次数过多/过少？是否有明显遗漏的信息源（如财报、分析师评级）？
 
-  const resp = await reflectionLlm.invoke([new HumanMessage(evalPrompt)]);
-  const content = (resp.content as string).trim().toLowerCase();
-  return content.includes("success") ? "success" : "failure";
+### 维度 B — 结论依据真实性（dimension: "evidence"）
+逐条检查最终结论中的关键论断（股价、财务数字、估值、评级、事件）：
+- 该论断能否在搜索结果中找到明确出处？还是 Agent 凭参数化记忆编造的？
+- 是否把过时信息当作最新信息？是否把推测/观点当作事实陈述？
+- 提炼出能提升分析准确性的规则
+
+## 要求
+- 每个维度最多提炼 2 条，总共最多 3 条；没有值得提炼的维度就跳过
+- 规则必须可迁移（适用于其他股票/资产的分析，不绑定本次的具体公司）
+- 规则必须具体可执行，不要"要小心""要严谨"这类废话`;
+
+// Heuristic 的结构化输出 schema（withStructuredOutput 底层走 function calling，
+// 顶层必须是 object，所以把数组包一层）
+const reflectionSchema = z.object({
+  heuristics: z
+    .array(
+      z.object({
+        dimension: z
+          .enum(["flow", "evidence"])
+          .describe("flow=执行流程改进, evidence=结论依据真实性"),
+        trigger: z.string().describe("IF [触发条件]"),
+        action: z.string().describe("THEN [行动建议]"),
+        rationale: z.string().describe("因为[原因]"),
+      }),
+    )
+    .max(3)
+    .describe("提炼出的经验规则，最多 3 条"),
+});
+
+const structuredReflectionLlm =
+  reflectionLlm.withStructuredOutput(reflectionSchema);
+
+async function reflectAndStore(
+  task: string,
+  trajectory: string,
+): Promise<HeuristicEntry[]> {
+  const prompt = REFLECTION_PROMPT.replace("{task}", task).replace(
+    "{trajectory}",
+    trajectory,
+  );
+
+  let parsed: z.infer<typeof reflectionSchema>;
+  try {
+    parsed = await structuredReflectionLlm.invoke([new HumanMessage(prompt)]);
+  } catch (e: any) {
+    console.log(`  ⚠️ 反思结构化输出失败，跳过：${e.message}`);
+    return [];
+  }
+
+  const entries: HeuristicEntry[] = parsed.heuristics.slice(0, 3).map((p) => ({
+    id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    dimension: p.dimension,
+    trigger: p.trigger,
+    action: p.action,
+    rationale: p.rationale,
+    sourceTask: task.slice(0, 50),
+    createdAt: new Date().toISOString(),
+  }));
+
+  if (entries.length > 0) {
+    const { total, evicted } = addHeuristics(entries);
+    console.log(
+      `  💾 写入 ${entries.length} 条 → 文件共 ${total} 条${evicted > 0 ? `（FIFO 淘汰了最老的 ${evicted} 条）` : ""}`,
+    );
+  }
+  return entries;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -619,139 +494,85 @@ ${trajectory}
 // ══════════════════════════════════════════════════════════════════════════
 
 async function main() {
+  if (process.argv.includes("--fresh")) {
+    fs.rmSync(HEURISTIC_FILE, { force: true });
+    console.log("🗑️  已清空 heuristic 文件\n");
+  }
+
   console.log("═".repeat(60));
-  console.log("10 - Heuristic Reflection: ERL + 质量控制");
+  console.log("10 - Heuristic Reflection: 投资分析 Agent（ERL 风格）");
   console.log("═".repeat(60));
+  console.log(`\nHeuristic 文件: ${HEURISTIC_FILE}`);
+  console.log(`当前池中: ${loadHeuristics().length}/${MAX_HEURISTICS} 条`);
 
-  // ── Phase 1: Agent 真实执行任务 → 自动记录轨迹 → 反思 ──
-  console.log("\n📚 Phase 1: Agent 执行任务 → 自动记录轨迹 → 反思");
-  console.log("─".repeat(40));
+  // ── Phase 1: Hot Path 执行任务（Tracer 自动记录轨迹）──
+  const task1 =
+    "分析英伟达(NVDA)当前的投资价值：结合最新股价、最近一季财报和近期新闻，给出买入/持有/卖出倾向和核心依据";
 
-  const tasks = [
-    "用户（U12345）问'有没有 iPhone 15 手机壳推荐'，搜索商品并推荐 Top-3 给用户",
-    "用户说'帮我退了那个不好用的'（用户ID: U12345），处理退货请求",
-    "用户（U67890）问'300以内适合跑步的蓝牙耳机'，推荐商品",
-    "查询用户张三的最近订单状态",
-  ];
+  console.log("\n" + "─".repeat(60));
+  console.log(`📈 Phase 1 [Hot Path] 执行任务:\n   ${task1}`);
+  console.log("─".repeat(60));
 
-  const executions: TaskExecution[] = [];
-  for (const task of tasks) {
-    console.log(`\n  🏃 执行任务: "${task}"`);
-    console.log("  " + "·".repeat(36));
-    const execution = await runAgentTask(task);
-    executions.push(execution);
-    console.log(`  📝 轨迹:\n${execution.trajectory.split("\n").map(l => "    " + l).join("\n")}`);
-    console.log(`  🏷️  Outcome: ${execution.outcome}`);
+  const run1 = await runTask(task1);
+  console.log(
+    `\n📝 Tracer 共记录 ${run1.trajectory.split("\nStep ").length} 步（完整轨迹交给 Cold Path 反思）`,
+  );
+
+  // ── Cold Path: 反思提炼（两个维度）──
+  console.log("\n" + "─".repeat(60));
+  console.log(
+    "🧠 [Cold Path] 反思提炼 Heuristic（维度 A 流程 / 维度 B 依据真实性）",
+  );
+  console.log("─".repeat(60));
+
+  const learned = await reflectAndStore(task1, run1.trajectory);
+  for (const h of learned) {
+    console.log(`\n  [${h.dimension}] ${h.trigger}`);
+    console.log(`         ${h.action}`);
+    console.log(`         (${h.rationale})`);
   }
 
-  // ── 反思并存入 Pool ──
-  console.log("\n\n🧠 反思：从轨迹中提炼 Heuristic");
-  console.log("─".repeat(40));
+  // ── Phase 2: 新任务，agent node 动态加载 Learned Layer ──
+  const task2 =
+    "分析特斯拉(TSLA)当前的投资价值：结合最新股价、交付数据和近期新闻，给出买入/持有/卖出倾向和核心依据";
 
-  const heuristicIds: string[] = [];
-  for (let i = 0; i < executions.length; i++) {
-    const exec = executions[i];
-    const mode: HeuristicStatus = i < 2 ? "shadow" : "pending";
-    console.log(
-      `\n  反思: "${exec.task.slice(0, 30)}..." [${exec.outcome}] → ${mode}`
-    );
-    const { id, heuristicText } = await reflectAndStore(exec, mode);
-    if (id) {
-      heuristicIds.push(id);
-      console.log(`  → ${heuristicText}`);
-    }
-  }
+  console.log("\n" + "─".repeat(60));
+  console.log(
+    `📈 Phase 2 [Hot Path] 新任务（system prompt 动态加载 ${loadHeuristics().length} 条 heuristic）:\n   ${task2}`,
+  );
+  console.log("─".repeat(60));
 
-  // ── 模式 2 演示：Shadow → Validate → Promote ──
-  console.log("\n\n🔬 模式 2: Staged Rollout（Shadow → Validate → Promote）");
-  console.log("─".repeat(40));
+  const run2 = await runTask(task2);
+  console.log(
+    `\n📝 Tracer 共记录 ${run2.trajectory.split("\nStep ").length} 步（完整轨迹交给 Cold Path 反思）`,
+  );
 
-  for (let i = 0; i < Math.min(2, heuristicIds.length); i++) {
-    const id = heuristicIds[i];
-    if (!id) continue;
+  // Phase 2 同样会反思 → 持续学习（池子持续增长，到 20 条触发 FIFO 淘汰）
+  console.log("\n" + "─".repeat(60));
+  console.log("🧠 [Cold Path] 对 Phase 2 同样反思（持续学习）");
+  console.log("─".repeat(60));
+  await reflectAndStore(task2, run2.trajectory);
 
-    console.log(`\n  验证 Heuristic [${id}]...`);
-    const validation = await validateInShadow(id);
-    console.log(
-      `  → 评分: ${validation.score}/10 | 通过: ${validation.passed} | 原因: ${validation.reason}`
-    );
-
-    if (validation.passed) {
-      await promoteToProduction(id);
-      console.log(`  ✅ 已提升到 production`);
-    } else {
-      console.log(`  ⏸️  未通过，保留在 shadow`);
-    }
-  }
-
-  // ── 模式 3 演示：Pending → 人工 Approve/Reject ──
-  console.log("\n\n👤 模式 3: Human-in-the-Loop（Pending → Approve/Reject）");
-  console.log("─".repeat(40));
-
-  const pendingList = await getPendingHeuristics();
-  console.log(`\n  待审核队列: ${pendingList.length} 条`);
-  for (const item of pendingList) {
-    console.log(`  [${item.id}] ${item.entry.heuristicText}`);
-  }
-
-  if (pendingList.length >= 1) {
-    const first = pendingList[0];
-    console.log(`\n  审核员: APPROVE [${first.id}]`);
-    await approveHeuristic(first.id, "规则具体可执行，通过");
-    console.log(`  ✅ 进入 production（confidence: 0.8）`);
-  }
-
-  if (pendingList.length >= 2) {
-    const second = pendingList[1];
-    console.log(`\n  审核员: REJECT [${second.id}]`);
-    await rejectHeuristic(second.id, "过于泛化或场景有限");
-    console.log(`  ❌ 已拒绝`);
-  }
-
-  // ── Phase 2: 新任务——带 Heuristic 指导 vs 无指导对比 ──
-  console.log("\n\n📋 Phase 2: 新任务对比（有/无 Heuristic 指导）");
-  console.log("─".repeat(40));
-
-  const newTask =
-    "用户（U12345）问'帮我推荐几款200块左右的运动手表'，搜索并推荐";
-
-  const retrieved = await retrieveHeuristics(newTask);
-  console.log(`\n  🔍 检索到 ${retrieved.length} 条 production Heuristic：`);
-  retrieved.forEach((h, i) => console.log(`     ${i + 1}. ${h}`));
-
-  console.log("\n  ▶ 带 Heuristic 指导的执行方案：");
-  console.log("  " + "─".repeat(36));
-  const result = await executeWithHeuristics(newTask, true);
-  console.log("  " + result.split("\n").join("\n  "));
-
-  // ── 最终 Pool 状态 ──
-  console.log("\n\n📊 最终 Heuristic Pool 状态：");
-  console.log("─".repeat(40));
-  const all = await heuristicStore.search(HEURISTIC_NAMESPACE, {
-    query: "all rules",
-    limit: 100,
-  });
-  for (const item of all) {
-    const v = item.value as any as HeuristicEntry;
-    const statusIcon =
-      v.status === "production"
-        ? "✅"
-        : v.status === "rejected"
-          ? "❌"
-          : v.status === "shadow"
-            ? "👁️"
-            : "⏳";
-    console.log(
-      `  ${statusIcon} [${v.status}] confidence=${v.confidence} | ${v.trigger} ${v.action}`
-    );
+  // ── 最终池状态 ──
+  const pool = loadHeuristics();
+  console.log("\n" + "═".repeat(60));
+  console.log(
+    `📊 最终 Heuristic 池（${pool.length}/${MAX_HEURISTICS}，文件持久化，跨运行累积）`,
+  );
+  console.log("═".repeat(60));
+  for (const h of pool) {
+    console.log(`  [${h.dimension}] ${h.trigger} ${h.action}`);
   }
 
   console.log("\n" + "═".repeat(60));
-  console.log("✅ 完整 ERL 循环演示完成：");
-  console.log("   1. Agent 真实执行 → Tracer 记录轨迹");
-  console.log("   2. LLM-as-Judge 评估 outcome");
-  console.log("   3. 反思提炼 Heuristic → 质量控制审查");
-  console.log("   4. 新任务带经验指导执行");
+  console.log("✅ 演示完成：");
+  console.log("   1. Hot Path: LangGraph ReAct loop（agent ⇄ web_search）");
+  console.log("   2. Tracer 内嵌 graph state，零成本记录轨迹");
+  console.log("   3. Cold Path 反思：A 流程改进 + B 依据真实性");
+  console.log("   4. Heuristic 直接写本地文件（无审核），上限 20 条 FIFO 淘汰");
+  console.log(
+    "   5. agent node 分层 system prompt：Core + Learned（动态加载）",
+  );
   console.log("═".repeat(60));
 }
 
