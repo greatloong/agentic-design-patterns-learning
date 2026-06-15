@@ -61,9 +61,9 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 // ── LLM 配置（DeepSeek，用于 AUDN 决策 + Agent 对话）─────────────────────
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
   temperature: 0,
 });
 

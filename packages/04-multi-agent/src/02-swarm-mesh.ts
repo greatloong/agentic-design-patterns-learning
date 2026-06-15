@@ -74,9 +74,9 @@ import { z } from "zod";
 // ── LLM ───────────────────────────────────────────────────────────────────
 // 全部用 DeepSeek（直连，OpenAI 协议，多轮 tool 兼容性好）
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 });
 
 // ── State ─────────────────────────────────────────────────────────────────

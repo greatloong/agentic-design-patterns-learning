@@ -38,9 +38,9 @@ const tools = [weatherTool];
 
 // ── LLM + 图 ───────────────────────────────────────────────────────────────
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 }).bindTools(tools);
 
 async function agentNode(state: typeof MessagesAnnotation.State) {

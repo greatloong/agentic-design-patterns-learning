@@ -99,10 +99,10 @@ const tools = [calculatorTool, weatherTool];
 // ── 2. 初始化 LLM ──────────────────────────────────────────────────────────
 // DeepSeek 兼容 OpenAI 协议，配置 baseURL 即可
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
   configuration: {
-    baseURL: "https://api.deepseek.com/v1",
+    baseURL: process.env.DASHSCOPE_BASE_URL,
   },
 }).bindTools(tools); // 把工具绑定给 LLM，LLM 才知道有哪些工具可用
 

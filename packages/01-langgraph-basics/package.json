@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "01": "tsx src/index.ts",
     "02": "tsx src/02-conditional-edge.ts",
     "03": "tsx src/03-react-agent.ts",
     "04": "tsx src/04-checkpointer.ts",

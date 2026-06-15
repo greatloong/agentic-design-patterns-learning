@@ -155,9 +155,9 @@ const tools = [getUserTool, getOrderTool, refundTool];
 // 中转服务会把空 text 块传给 Anthropic，触发 "text: Field required" 错误。
 // DeepSeek 用原生 OpenAI 协议，没有这个问题。
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 }).bindTools(tools);
 
 // ── 图结构（标准 ReAct 循环）─────────────────────────────────────────────

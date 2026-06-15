@@ -53,9 +53,9 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 // ── 基础配置 ────────────────────────────────────────────────────────────
 
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
   temperature: 0,
 });
 

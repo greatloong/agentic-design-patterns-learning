@@ -34,7 +34,7 @@
  *
  * 1. Docker: docker compose up -d  (packages/05-memory/docker-compose.yml)
  *    → Postgres + pgvector on localhost:5433
- * 2. .env: DEEPSEEK_API_KEY, DASHSCOPE_API_KEY
+ * 2. .env: DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
  */
 
 import "dotenv/config";

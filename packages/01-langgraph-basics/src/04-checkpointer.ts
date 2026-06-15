@@ -19,9 +19,9 @@ import { HumanMessage } from "@langchain/core/messages";
 
 // ── LLM ───────────────────────────────────────────────────────────────────
 const llm = new ChatOpenAI({
-  model: "deepseek-chat",
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  configuration: { baseURL: "https://api.deepseek.com/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 });
 
 // ── 节点 ───────────────────────────────────────────────────────────────────
