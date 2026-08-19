@@ -65,9 +65,9 @@ const MAX_ITERATIONS = 3;
 // ── LLM ───────────────────────────────────────────────────────────────────
 // Generator 和 Critic 用同一个 LLM 实例，通过不同 system prompt 区分角色
 const llm = new ChatOpenAI({
-  model: "claude-sonnet-4-6",
-  apiKey: process.env.CUSTOM_API_KEY,
-  configuration: { baseURL: "https://new.pumpkinai.vip/v1" },
+  model: "deepseek-v4-pro",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 });
 
 // Critic 的结构化输出 schema

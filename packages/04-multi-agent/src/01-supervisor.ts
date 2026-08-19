@@ -74,9 +74,9 @@ import { searchTool } from "./shared/search-tool.js";
 //     "messages.X.content.X.text: Field required"（参考 02-tool-use.ts）
 //   - DeepSeek 原生 OpenAI 协议，无中转层，稳定
 const llm = new ChatOpenAI({
-  model: "claude-sonnet-4-6",
-  apiKey: process.env.CUSTOM_API_KEY,
-  configuration: { baseURL: "https://new.pumpkinai.vip/v1" },
+  model: "deepseek-v4-flash",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 });
 
 const toolUseLlm = new ChatOpenAI({

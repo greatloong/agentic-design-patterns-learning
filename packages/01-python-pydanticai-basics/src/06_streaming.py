@@ -1,88 +1,90 @@
-"""0.6 Streaming —— 流式输出与过程事件
+"""0.6 Streaming（纯 Graph，无 Agent）—— 两个层次的流：节点级 + token 级
 
-对照 LangGraph 的 streaming（graph.stream 的 updates / messages 两种 streamMode）：
-- LangGraph 给你 "messages"（token 级增量）和 "updates"（节点级状态变更）两种流。
-- Pydantic AI 对应有两个层次的 API：
-    (1) `run_stream(...)` + `stream_text()`：聚焦**最终答案**的文本增量（最常用、最简单）。
-    (2) `run_stream_events(...)`：把**整个运行过程**的事件都吐出来——模型在调哪个工具、
-        工具返回了什么、文本/思维链 delta……（相当于 "updates" + 全过程可观测）。
+对照 LangGraph 的 `graph.stream`：
+- "updates"：**节点级**——每个节点跑完吐一次状态变更。
+- "messages"：**token 级**——最终答案逐字增量。
 
-⚠️ 一个重要的坑（官方文档明确提示）：当 output_type 是 str 时，`run_stream` 把"第一个
-匹配输出类型的内容"当作最终结果。如果模型在调用工具**之前**先吐了一句文字，那句话就被
-当成最终答案，后面的工具调用**默认不会执行**。所以"边调工具边观察过程"应该用
-`run_stream_events()` 或 `agent.iter()`（它们会把整张 agent 图跑到底）。demo(2) 正是用前者。
+纯 graph 怎么做这两层：
+- **节点级**：`async with graph.iter(...) as run: async for node in run` —— 图每推进一个节点
+  就 yield 一次（≈ updates）。
+- **token 级**：在节点内部直接用底层 `model.request_stream(...)` 拿增量（封装在
+  `shared.model.stream_text` 里），把最终答案逐字吐出（≈ messages）。无需 Agent。
+
+本例把两层叠在一次运行里看：图从 Lookup 走到 Summarize（节点级流），
+而 Summarize 节点内部又把总结文字逐字流式打印（token 级流）。
+
+执行顺序小知识：`async for node in run` 会**先 yield 节点、再运行它**——所以循环体里打印的
+「节点标签」会正好出现在该节点 token 流的前面，输出自然不串行。
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from dataclasses import dataclass
 
-from pydantic_ai import (
-    Agent,
-    AgentRunResultEvent,
-    FinalResultEvent,
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
-    PartDeltaEvent,
-    PartStartEvent,
-    TextPart,
-    TextPartDelta,
-    ToolCallPartDelta,
-)
+from pydantic_graph import BaseNode, End, GraphRunContext
+from pydantic_graph.graph import Graph
 
-from shared.model import get_model
+from shared.model import get_model, stream_text, user_msg
 
-agent = Agent(
-    get_model(),
-    instructions="你是天气助手。需要天气时调用 get_forecast 工具，然后用一句话总结。",
-)
+model = get_model()
+
+_SUMMARY_SYSTEM = "你是天气助手，根据给到的预报数据用一句话总结。"
 
 
-@agent.tool_plain
-def get_forecast(city: str, day: date) -> str:
-    """查询某城市某天的天气预报。"""
-    return f"{city} 在 {day} 晴，24°C"
+@dataclass
+class StreamState:
+    city: str
+    day: str
+    forecast: str = ""
+    summary: str = ""
 
 
-async def demo_text_stream() -> None:
-    """(1) 最常用：流式拿最终答案的文本增量（delta=True 给增量片段）。"""
-    print("=== (1) 纯文本流式（最终答案逐字出）===")
-    async with agent.run_stream("用一句话介绍杭州的西湖。") as response:
-        async for piece in response.stream_text(delta=True):
+@dataclass
+class Lookup(BaseNode[StreamState]):
+    """查预报（mock）。对照 ReAct 里的工具节点，这里直接产出数据写回 State。"""
+
+    async def run(self, ctx: GraphRunContext[StreamState]) -> Summarize:
+        ctx.state.forecast = f"{ctx.state.city} 在 {ctx.state.day} 晴，24°C，东南风 3 级"
+        return Summarize()
+
+
+@dataclass
+class Summarize(BaseNode[StreamState, None, str]):
+    """token 级流：节点内部直接调底层 model 的流式接口，逐字打印总结。"""
+
+    async def run(self, ctx: GraphRunContext[StreamState]) -> End[str]:
+        prompt = f"用一句话总结这条天气预报：{ctx.state.forecast}"
+        messages = [user_msg(prompt, system=_SUMMARY_SYSTEM)]
+        text = ""
+        print("    （token 流）", end="", flush=True)
+        async for piece in stream_text(model, messages):
             print(piece, end="", flush=True)
-    print()
+            text += piece
+        print()
+        ctx.state.summary = text
+        return End(text)
 
 
-async def demo_event_stream() -> None:
-    """(2) 全过程事件流：观察 ReAct 循环里的每一步。
-
-    run_stream_events 会把整张图跑到底，逐个 yield 事件；最后一个事件是
-    AgentRunResultEvent，携带最终结果。
-    """
-    print("\n=== (2) 全过程事件流（看工具调用 + 最终答案）===")
-    async with agent.run_stream_events("杭州 2026-07-01 天气怎么样？") as stream:
-        async for event in stream:
-            if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
-                print("  [文本开始]", repr(event.part.content))
-            elif isinstance(event, PartDeltaEvent):
-                if isinstance(event.delta, TextPartDelta):
-                    print(f"  [文本增量] {event.delta.content_delta!r}")
-                elif isinstance(event.delta, ToolCallPartDelta):
-                    print(f"  [工具入参增量] {event.delta.args_delta}")
-            elif isinstance(event, FunctionToolCallEvent):
-                print(f"  [调用工具] {event.part.tool_name} args={event.part.args}")
-            elif isinstance(event, FunctionToolResultEvent):
-                print(f"  [工具返回] {event.part.content}")
-            elif isinstance(event, FinalResultEvent):
-                print("  [开始产出最终结果]")
-            elif isinstance(event, AgentRunResultEvent):
-                print(f"\n  最终答案：{event.result.output}")
+stream_graph = Graph(nodes=(Lookup, Summarize), state_type=StreamState)
 
 
 async def main() -> None:
-    await demo_text_stream()
-    await demo_event_stream()
+    print("=== stream_graph 结构（mermaid）===")
+    print(stream_graph.mermaid_code(start_node=Lookup))
+
+    print("\n=== 一次运行里看两层流（节点级 updates + token 级 messages）===")
+    state = StreamState(city="杭州", day="2026-07-01")
+    async with stream_graph.iter(Lookup(), state=state) as run:
+        async for node in run:
+            if isinstance(node, End):
+                print("  [节点级] 图结束 (END)")
+            else:
+                print(f"  [节点级] 进入 {type(node).__name__} 节点")
+
+    assert run.result is not None
+    print("\n=== 最终答案 ===")
+    print(run.result.output)
 
 
 if __name__ == "__main__":

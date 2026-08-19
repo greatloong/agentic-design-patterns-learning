@@ -1,12 +1,13 @@
 # Agent 系统性学习计划
 
 > 学习路径：LangGraph 底层原语 → Agentic Design Patterns (21章) → Claude Code 源码分析
-> 实践语言：TypeScript + LangGraph（主线）｜ Python + Pydantic AI（平行对照线）
+> 实践语言：**Python + pydantic-graph（后续默认主线）**｜ TypeScript + LangGraph（阶段零～四.1 已完成对照）
 > LLM：DeepSeek API（兼容 OpenAI 协议）
 > 参考资料：
 >
 > - ADP 书籍：https://github.com/xindoo/agentic-design-patterns
 > - LangGraph 文档：https://docs.langchain.com/oss/javascript/langgraph/overview
+> - pydantic-graph 文档：https://ai.pydantic.dev/graph/
 
 ---
 
@@ -22,7 +23,12 @@
 | 阶段五 | 工程化能力 (Ch.10-13)    | ⏳ 待开始 |
 | 阶段六 | 高级主题 (Ch.14-21)      | ⏳ 待开始 |
 | 阶段七 | 生产级实践 (Claude Code) | ⏳ 待开始 |
-| Python 线 | Pydantic AI 基础（对照阶段零） | ✅ 完成 |
+| Python 线 | pydantic-graph 基础（对照阶段零） | ✅ 完成 |
+
+> **栈切换（2026-08-19）**：阶段零～阶段四.1 已用 TypeScript + LangGraph 完成，代码保留作对照。
+> **从阶段四.2 起，后续默认练习改为 Python + pydantic-graph**（`pydantic-ai` 的图编排层，**不用 `Agent` 高层封装**）：
+> 流程用 `Graph` / `BaseNode` / `End` 显式编排，单步 LLM 调用直接打到底层 `Model.request()`。
+> 与 LangGraph 同一抽象层（State / Node / Edge），只换语言和框架。
 
 ---
 
@@ -76,36 +82,35 @@
 
 ---
 
-## Python 平行学习线：Pydantic AI 基础
+## Python 平行学习线：pydantic-graph 基础
 
 > package: `packages/01-python-pydanticai-basics`
-> 目标：用 **Python + Pydantic AI** 重走阶段零的 6 个基础主题，建立"同一套 Agent 概念在不同
-> 框架/语言里如何落地"的对照认知；顺带回炉 Python 工程化与语言特性。
-> 技术栈：`pydantic-ai`（完整版）+ `uv`（包管理）+ DashScope `deepseek-v4-pro`（兼容 OpenAI 协议）
+> 目标：用 **Python + pydantic-graph**（不用 `Agent`）重走阶段零的 6 个基础主题，建立
+> "同一套 Agent 概念在不同框架/语言里如何落地"的对照认知；这也是**后续章节的默认实现栈**。
+> 技术栈：`pydantic-graph` + `pydantic-ai` 的 `Model` + `uv` + DashScope `deepseek-v4-pro`
 
-| #   | 主题（Pydantic AI）             | 文件                            | 对照阶段零 | 状态    |
+| #   | 主题（pydantic-graph）          | 文件                            | 对照阶段零 | 状态    |
 | --- | ------------------------------- | ------------------------------- | ---------- | ------- |
-| P.1 | Agent 与结构化输出              | `src/01_agent_basics.py`        | 0.1 State/Node/Edge | ✅ 完成 |
+| P.1 | State / Node / Edge 地基        | `src/01_agent_basics.py`        | 0.1 State/Node/Edge | ✅ 完成 |
 | P.2 | 条件路由                        | `src/02_routing.py`             | 0.2 条件路由 | ✅ 完成 |
-| P.3 | ReAct Agent（工具 + 依赖注入）  | `src/03_react_tools.py`         | 0.3 ReAct  | ✅ 完成 |
-| P.4 | 消息历史与持久化                | `src/04_message_history.py`     | 0.4 Checkpointer | ✅ 完成 |
-| P.5 | Human-in-the-Loop（工具审批）   | `src/05_human_in_the_loop.py`   | 0.5 HITL   | ✅ 完成 |
-| P.6 | Streaming（流式 + 过程事件）    | `src/06_streaming.py`           | 0.6 Streaming | ✅ 完成 |
+| P.3 | 显式 ReAct 循环（Think ⇄ Act）  | `src/03_react_tools.py`         | 0.3 ReAct  | ✅ 完成 |
+| P.4 | 状态持久化                      | `src/04_message_history.py`     | 0.4 Checkpointer | ✅ 完成 |
+| P.5 | Human-in-the-Loop               | `src/05_human_in_the_loop.py`   | 0.5 HITL   | ✅ 完成 |
+| P.6 | Streaming（节点级 + token 级）  | `src/06_streaming.py`           | 0.6 Streaming | ✅ 完成 |
 
 ### 关键概念笔记（框架对照）
 
-- **核心抽象差异**：LangGraph **以图为中心**（显式声明 State/Node/Edge）；Pydantic AI **以 Agent 为中心**
-  （模型+指令+工具+输出类型的容器，内部也跑一张 pydantic-graph 状态机，但默认隐藏）。
-- **结构化输出**是 Pydantic AI 的招牌：`output_type=BaseModel`，模型给的数据自动校验，不合规则回喂重试。
-- **ReAct 循环内置**：`@agent.tool` 注册工具后，"模型调用→执行→回喂→继续"的循环由框架托管，无需手搭。
-- **记忆 = 显式传 message_history**：对照 Checkpointer 的"框架托管自动存取"，Pydantic AI 是"你拿到消息、
-  自己决定存哪"，配 `ModelMessagesTypeAdapter` 序列化落盘即得手动版 Checkpointer。
-- **HITL = deferred tools**：高危工具标 `requires_approval=True`，run 以 `DeferredToolRequests` 中断，
-  人工审批后带 `DeferredToolResults` + 原 message_history 恢复。
-- **思考模型坑（已解决）**：`deepseek-v4-pro` 是 thinking 模型，DashScope 思考模式禁止 `tool_choice=required`，
-  与 pydantic-ai 默认的工具输出模式冲突 → 结构化输出改用 `PromptedOutput`（schema 进提示词、返回 JSON 文本再校验）。
-- **流式坑**：`output_type=str` 时 `run_stream` 把首段文字当最终结果、后续工具调用默认不执行；
-  要全过程可观测用 `run_stream_events()` / `agent.iter()`。
+- **同一层抽象**：LangGraph 与 pydantic-graph 都是显式 State / Node / Edge。日常 pydantic-ai
+  用户多半只碰 `Agent`（内部偷偷跑一张图）；本线把 `Agent` 拿掉，节点直接调 `Model.request()`。
+- **Edge 靠返回注解**：节点 `run()` 的返回类型（如 `Act | End[str]`）就是出边；框架据此画 mermaid、运行时校验。
+- **结构化输出靠手写**：提示词要求 JSON，再用 Pydantic `model_validate_json` 校验（`shared.model.parse_json`）。
+  全程不声明工具、不用 `tool_choice`，自然绕开思考模型在 DashScope 下禁止 `tool_choice=required` 的 400。
+- **ReAct 显式搭**：`Think ⇄ Act` 两个节点互指，工具用 deps 注入，动作用手写 JSON（对照 LangGraph 的 ToolNode + shouldContinue）。
+- **持久化**：自己维护 `list[ModelMessage]`，用 `FileStatePersistence` 存/读图快照（对照 Checkpointer）。
+- **HITL**：`graph.iter()` / `next()` 在节点处暂停再恢复（对照 interrupt）。
+- **两层流**：`graph.iter()` 看节点级 updates，`model.request_stream` 看 token 级 messages。
+- **API 取舍**：pydantic-graph 1.105 的新 `GraphBuilder` 尚未接入状态持久化，本线统一用稳定的
+  `Graph(nodes=...)` + `await graph.run(...)`（避免 `run_sync()` 在 Py3.12 的事件循环告警）。
 - **工程化对照**：`uv`≈pnpm，`pyproject.toml`≈package.json，`uv.lock`≈pnpm-lock.yaml，`.venv/`≈node_modules/。
   详见 `packages/01-python-pydanticai-basics/PYTHON_NOTES.md`。
 
@@ -153,7 +158,8 @@
 ## 阶段四：记忆与学习
 
 > 对应 ADP Ch.8-9
-> package: `packages/05-memory`
+> package: `packages/05-memory`（4.1 已用 TS + LangGraph 完成）
+> **4.2 起默认实现：Python + pydantic-graph（不用 `Agent`）**
 
 | #   | ADP章节 | Pattern               | 核心思想                                           | 状态 |
 | --- | ------- | --------------------- | -------------------------------------------------- | ---- |
@@ -166,6 +172,7 @@
 
 > 对应 ADP Ch.10-13
 > package: `packages/06-engineering`
+> **默认实现：Python + pydantic-graph（不用 `Agent`）**
 
 | #   | ADP章节 | Pattern                   | 核心思想                            | 状态 |
 | --- | ------- | ------------------------- | ----------------------------------- | ---- |
@@ -180,6 +187,7 @@
 
 > 对应 ADP Ch.14-21
 > package: `packages/07-advanced`
+> **默认实现：Python + pydantic-graph（不用 `Agent`）**
 
 | #   | ADP章节 | Pattern                     | 核心思想                     | 状态 |
 | --- | ------- | --------------------------- | ---------------------------- | ---- |
@@ -198,6 +206,7 @@
 
 > Claude Code 源码分析
 > package: `packages/08-claude-code-analysis`
+> 源码阅读不限语言；若动手复现，**默认 Python + pydantic-graph**
 
 | #   | 主题                       | 状态 |
 | --- | -------------------------- | ---- |
@@ -212,14 +221,14 @@
 
 ```
 packages/
-├── 01-langgraph-basics/            ← 阶段零：LangGraph 基础（TS 主线）
-├── 01-python-pydanticai-basics/    ← Python 线：Pydantic AI 基础（对照阶段零）
-├── 02-basic-workflows/             ← 阶段一：Ch.1-3
-├── 03-core-agent-patterns/         ← 阶段二：Ch.4-6
-├── 04-multi-agent/                 ← 阶段三：Ch.7
-├── 05-memory/                      ← 阶段四：Ch.8-9
-├── 06-engineering/                 ← 阶段五：Ch.10-13
-├── 07-advanced/                    ← 阶段六：Ch.14-21
+├── 01-langgraph-basics/            ← 阶段零：LangGraph 基础（TS，已完成对照）
+├── 01-python-pydanticai-basics/    ← pydantic-graph 基础（对照阶段零，后续默认栈）
+├── 02-basic-workflows/             ← 阶段一：Ch.1-3（TS，已完成）
+├── 03-core-agent-patterns/         ← 阶段二：Ch.4-6（TS，已完成）
+├── 04-multi-agent/                 ← 阶段三：Ch.7（TS，已完成）
+├── 05-memory/                      ← 阶段四：Ch.8-9（4.1 TS 已完成；4.2 起 Python）
+├── 06-engineering/                 ← 阶段五：Ch.10-13（后续：Python + pydantic-graph）
+├── 07-advanced/                    ← 阶段六：Ch.14-21（后续：Python + pydantic-graph）
 └── 08-claude-code-analysis/        ← 阶段七：源码分析
 ```
 
@@ -241,7 +250,8 @@ packages/
    - 📝 **讲解完成后**：老师将调研摘要 + 讲解内容（概念、问题、对比表等）**自动更新**到对应章节 markdown 中，确保 markdown 始终是完整的学习档案
 3. **⏸ 暂停消化**：学生独立思考，回答问题，确认理解后再继续
    - 📝 **暂停结束后**：老师将本轮 Q&A 讨论的关键认知、补充案例、纠偏点**自动追加**到对应章节 markdown 的"消化记录"小节
-4. **实现**：用 LangGraph 原语从底层实现（不用高层封装），**实现风格对齐生产实践**
+4. **实现**：用 **Python + pydantic-graph** 从底层实现（不用 `Agent` 高层封装；
+   已完成的 TS + LangGraph 包仅作对照，不再作为新练习默认栈），**实现风格对齐生产实践**
 5. **⏸ 暂停验证**：学生跑通代码，观察执行过程，遇到问题自行 debug 或提问
    - 📝 **暂停结束后**：老师将 debug 过程、踩过的坑、关键修复**自动追加**到对应章节 markdown 的"验证记录"小节
 6. **回顾**：老师带领对比分析（与上一个 Pattern 的区别和联系），**结合行业案例**总结关键点
@@ -251,7 +261,7 @@ packages/
 
 ### 大章节补充节奏（适用包含多个编码小节的章节，如 4.1 Memory）
 
-大章节（如 Memory、RAG）通常包含多个编码小节（01-xx.ts、02-xx.ts……）。
+大章节（如 Memory、RAG）通常包含多个编码小节（01-xx.py、02-xx.py……）。
 章节整体讲解完成后，**每个编码小节开始前**，需额外执行以下步骤：
 
 - **小节讲解**：老师针对本小节的核心概念做详细讲解（问题→朴素方案→演化路径），可追问
@@ -269,4 +279,4 @@ packages/
 
 ---
 
-_最后更新：2026-06-04_
+_最后更新：2026-08-19_

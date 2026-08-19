@@ -1,35 +1,67 @@
-"""0.1 Agent 与结构化输出 —— Pydantic AI 的"地基"
+"""0.1 纯 Graph 地基 —— State / Node / Edge（不依赖 Agent）
 
-对照 LangGraph 的 State / Node / Edge：
-- LangGraph 用「图」做核心抽象：你显式声明 State、写 Node 函数、连 Edge。
-- Pydantic AI 反过来，核心抽象是 **Agent**：一个把「模型 + 指令 + 工具 + 输出类型」
-  打包起来的容器。它内部其实也跑一张 pydantic-graph 的状态机，但默认对你隐藏，
-  你只需 `agent.run_sync(...)` 就能从头跑到尾。
+> 本系列是**纯 pydantic-graph 实现**：流程编排靠图，单步 LLM 调用直接打到底层
+> `Model.request()`，**完全不用 `Agent`**。`Agent` 只是 `Model` 上的封装（帮你管消息、
+> 工具、结构化输出、重试）；这里我们把它拿掉，亲手做这些事，彻底展示"graph 不需要 Agent"。
+> 底层调用的薄助手都在 `shared/model.py`（`ask` / `chat` / `parse_json` …）。
 
-本节只看两件最基础的事：
-  (1) 最朴素的纯文本 Agent；
-  (2) Pydantic AI 的招牌能力——用 `output_type` 强制模型返回**结构化、已校验**的数据。
-      模型若给出不合 schema 的内容，框架会自动把校验错误回喂给模型让它重试。
+graph 三件套（对照 LangGraph）：
+- **State**：`@dataclass`，随图流动、被各节点读写（≈ Annotation State）。
+- **Node**：`BaseNode` 子类，逻辑写在 `async def run()`（≈ Node 函数）。
+- **Edge**：由 `run()` 的返回类型注解推断——返回 `End[T]` 即走到终点（≈ `addEdge(node, END)`）。
+
+⚠️ API：pydantic-graph 1.105 的新 `GraphBuilder` 还没接持久化（撑不起 0.4/0.5），
+故统一用稳定的 `Graph(nodes=...)`，并用 `await graph.run(...)`（`run_sync()` 在 Py3.12
+会触发无害的 asyncio 事件循环 DeprecationWarning）。
 """
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
+
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, PromptedOutput
+from pydantic_graph import BaseNode, End, GraphRunContext
+from pydantic_graph.graph import Graph
 
-from shared.model import get_model
+from shared.model import ask, get_model, parse_json
 
-# ---------- (1) 最朴素：纯文本输出 ----------
-# 不指定 output_type 时，默认就是 str。
-text_agent = Agent(
-    get_model(),
-    instructions="你是一个简洁的助手，回答控制在一句话内。",
-)
+model = get_model()
 
 
-# ---------- (2) 结构化输出：用 Pydantic 模型当 output_type ----------
+# ---------- (1) 最朴素：纯文本输出的单节点图 ----------
+@dataclass
+class TextState:
+    """图的 State：问题进来、答案出去。各节点都能读写它。"""
+
+    question: str
+    answer: str = ""
+
+
+@dataclass
+class Reply(BaseNode[TextState, None, str]):
+    """唯一的节点：直接调底层 model 拿文本，写进 state 并结束整张图。
+
+    返回 `End[str]`：这条出边直接指向终点（≈ `addEdge("reply", END)`）。
+    泛型第 3 个参数 `str` 就是图的最终输出类型。
+    """
+
+    async def run(self, ctx: GraphRunContext[TextState]) -> End[str]:
+        text = await ask(
+            model,
+            ctx.state.question,
+            system="你是一个简洁的助手，回答控制在一句话内。",
+        )
+        ctx.state.answer = text
+        return End(text)
+
+
+text_graph = Graph(nodes=(Reply,), state_type=TextState)
+
+
+# ---------- (2) 结构化输出：自己写提示词要 JSON，再解析校验 ----------
 class CityInfo(BaseModel):
-    """一个城市的结构化信息。字段的注释会作为 schema 描述传给模型。"""
+    """一个城市的结构化信息。"""
 
     name: str = Field(description="城市名")
     country: str = Field(description="所属国家")
@@ -37,32 +69,50 @@ class CityInfo(BaseModel):
     famous_for: list[str] = Field(description="3 个最知名的标签")
 
 
-# 关于输出模式（output mode）的一个重要实战点：
-# pydantic-ai 默认用「输出工具 + tool_choice=required」来强制结构化输出（ToolOutput 模式）。
-# 但我们用的 deepseek-v4-pro 是**思考模型**，DashScope 在思考模式下不允许 tool_choice=required，
-# 会直接报 400。所以这里改用 PromptedOutput 模式：把 JSON schema 写进提示词，让模型返回
-# JSON 文本，pydantic-ai 再解析+校验。它不依赖 tool_choice，兼容任何模型（含思考模型）。
-#   - 普通（非思考）模型：可省略 PromptedOutput，直接 output_type=CityInfo 即可。
-city_agent = Agent(
-    get_model(),
-    output_type=PromptedOutput(CityInfo),  # 返回值会被校验并转成 CityInfo
-    instructions="你是地理百科助手，根据用户问的城市给出结构化信息。",
+# 没有 Agent 的 output_type 帮忙，"结构化"得自己来：提示词里要 JSON、自己 parse_json 校验。
+# 好处是不碰 tool_choice，思考模型也稳。
+_CITY_SYSTEM = (
+    "你是地理百科助手。只输出一个 JSON 对象，不要 markdown、不要解释，形如："
+    '{"name": "城市名", "country": "国家", "population_million": 人口数字, '
+    '"famous_for": ["标签1", "标签2", "标签3"]}'
 )
 
 
-def main() -> None:
-    print("=== (1) 纯文本 Agent ===")
-    r1 = text_agent.run_sync("用一句话介绍一下杭州。")
-    print(r1.output)  # 类型是 str
-    print(f"[usage] {r1.usage}\n")  # 新版里 usage 是属性，不是方法
+@dataclass
+class CityState:
+    query: str
+    info: CityInfo | None = None
 
-    print("=== (2) 结构化输出 Agent ===")
-    r2 = city_agent.run_sync("介绍一下杭州")
-    info = r2.output  # 类型是 CityInfo（IDE/类型检查器都能识别）
+
+@dataclass
+class Describe(BaseNode[CityState, None, CityInfo]):
+    """图的最终输出可以是任意类型——这里是校验后的 CityInfo（`End[CityInfo]`）。"""
+
+    async def run(self, ctx: GraphRunContext[CityState]) -> End[CityInfo]:
+        text = await ask(model, ctx.state.query, system=_CITY_SYSTEM)
+        info = parse_json(text, CityInfo)  # 解析 + Pydantic 校验
+        ctx.state.info = info
+        return End(info)
+
+
+city_graph = Graph(nodes=(Describe,), state_type=CityState)
+
+
+async def main() -> None:
+    print("=== text_graph 结构（mermaid）===")
+    print(text_graph.mermaid_code(start_node=Reply))
+
+    print("\n=== (1) 纯文本图 ===")
+    r1 = await text_graph.run(Reply(), state=TextState(question="用一句话介绍一下杭州。"))
+    print(r1.output)
+
+    print("\n=== (2) 结构化输出图（手写 JSON 解析）===")
+    r2 = await city_graph.run(Describe(), state=CityState(query="介绍一下杭州"))
+    info = r2.output  # 类型是 CityInfo
     print(repr(info))
     print(f"人口：{info.population_million} 百万")
     print(f"标签：{', '.join(info.famous_for)}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -58,9 +58,9 @@ import { searchTool } from "./shared/search-tool.js";
 
 // ── LLM ───────────────────────────────────────────────────────────────────
 const llm = new ChatOpenAI({
-  model: "claude-sonnet-4-6",
-  apiKey: process.env.CUSTOM_API_KEY,
-  configuration: { baseURL: "https://new.pumpkinai.vip/v1" },
+  model: "deepseek-v4-flash",
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  configuration: { baseURL: process.env.DASHSCOPE_BASE_URL },
 });
 
 const toolUseLlm = new ChatOpenAI({
